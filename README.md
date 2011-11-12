@@ -12,8 +12,8 @@ every time when function is started.
 
 
 ## Installation
- * copy source code to PostgreSQL's source code tree (9.0.x or 9.1.x) - to 'contrib' directory
- * compile it there and install it - 'make; make install'
+ * copy source code to PostgreSQL's source code tree (9.0.x or 9.1.x) - to _contrib_ directory
+ * compile it there and install it - _make; make install_
 
 ## Usage
 
@@ -56,7 +56,7 @@ This module can be deactivated by setting
 plpgsql_lint should to find all errors on really static code. When developer uses a some
 PLpgSQL's dynamic features like dynamic SQL or record data type, then a false alarms are
 possible. These alarms should be rare - in well written code - and then related function
-should me redesigned or plpgsql_lint should be disabled for this function.
+should be redesigned or plpgsql_lint should be disabled for this function.
 
 
     CREATE OR REPLACE FUNCTION f1()
@@ -70,7 +70,7 @@ should me redesigned or plpgsql_lint should be disabled for this function.
     END;
     $$ LANGUAGE plpgsql SET plpgsql.enable_lint TO false;
 
-''plpgsql_lint has a small overhed and only develop or preprod environments are preffered.''
+_A usage of plpgsql_lint does a small overhed and only develop or preprod environments are preffered._
 
 ### Dynamic SQL
 

@@ -21,11 +21,11 @@ static void assign_result_desc(PLpgSQL_execstate *estate,
 					    PLpgSQL_rec *rec,
 						    PLpgSQL_expr *query,
 							    bool use_element_type);
-static bool plpgsql_expr_walker(PLpgSQL_function *func,
+static bool plpgsql_lint_expr_walker(PLpgSQL_function *func,
 				PLpgSQL_stmt *stmt,
 					bool (*expr_walker)(),
 								void *context);
-static bool plpgsql_expr_prepare_plan(PLpgSQL_stmt *stmt, PLpgSQL_expr *expr, void *context);
+static bool plpgsql_lint_expr_prepare_plan(PLpgSQL_stmt *stmt, PLpgSQL_expr *expr, void *context);
 
 static PLpgSQL_plugin plugin_funcs = { NULL, lint_func_beg, NULL, NULL, NULL};
 
@@ -116,8 +116,8 @@ lint_func_beg( PLpgSQL_execstate * estate, PLpgSQL_function * func )
 			}
 		}
 
-		plpgsql_expr_walker(func, (PLpgSQL_stmt *) func->action,
-							    plpgsql_expr_prepare_plan, (void *) estate);
+		plpgsql_lint_expr_walker(func, (PLpgSQL_stmt *) func->action,
+							    plpgsql_lint_expr_prepare_plan, (void *) estate);
 
 		/* return back a original rec variables */
 		for (i = 0; i < estate->ndatums; i++)
@@ -197,11 +197,11 @@ exec_prepare_plan(PLpgSQL_execstate *estate,
 }
 
 /*
- * call a plpgsql_expr_walker for any statement in list
+ * call a plpgsql_lint_expr_walker for any statement in list
  *
  */
 static bool
-plpgsql_expr_walker_list(PLpgSQL_function *func, List *stmts,
+plpgsql_lint_expr_walker_list(PLpgSQL_function *func, List *stmts,
 					bool (*expr_walker)(),
 								void *context)
 {
@@ -211,7 +211,7 @@ plpgsql_expr_walker_list(PLpgSQL_function *func, List *stmts,
 	{
 		PLpgSQL_stmt *stmt = (PLpgSQL_stmt *) lfirst(lc);
 
-		if (plpgsql_expr_walker(func, stmt, expr_walker, context))
+		if (plpgsql_lint_expr_walker(func, stmt, expr_walker, context))
 			return true;
 	}
 	return false;
@@ -224,7 +224,7 @@ plpgsql_expr_walker_list(PLpgSQL_function *func, List *stmts,
  *
  */
 static bool
-plpgsql_expr_walker(PLpgSQL_function *func,
+plpgsql_lint_expr_walker(PLpgSQL_function *func,
 				PLpgSQL_stmt *stmt,
 					bool (*expr_walker)(),
 								void *context)
@@ -277,14 +277,14 @@ plpgsql_expr_walker(PLpgSQL_function *func,
 					}
 				}
 
-				if (plpgsql_expr_walker_list(func, stmt_block->body, expr_walker, context))
+				if (plpgsql_lint_expr_walker_list(func, stmt_block->body, expr_walker, context))
 					return true;
 
 				if (stmt_block->exceptions)
 				{
 					foreach(l, stmt_block->exceptions->exc_list)
 					{
-						if (plpgsql_expr_walker_list(func, ((PLpgSQL_exception *) lfirst(l))->action,
+						if (plpgsql_lint_expr_walker_list(func, ((PLpgSQL_exception *) lfirst(l))->action,
 														expr_walker,
 															    context))
 							return true;
@@ -301,13 +301,41 @@ plpgsql_expr_walker(PLpgSQL_function *func,
 			{
 				PLpgSQL_stmt_if *stmt_if = (PLpgSQL_stmt_if *) stmt;
 
+#if PG_VERSION_NUM >= 90200
+				ListCell *l;
+#endif
+
 				if (expr_walker(stmt, stmt_if->cond, context))
 					return true;
 
-				if (plpgsql_expr_walker_list(func, stmt_if->true_body, expr_walker, context))
+#if PG_VERSION_NUM >= 90200
+
+				if (plpgsql_lint_expr_walker_list(func, stmt_if->then_body, expr_walker, context))
+						return true;
+
+
+				foreach(l, stmt_if->elsif_list)
+				{
+					PLpgSQL_if_elsif *elif = (PLpgSQL_if_elsif *) lfirst(l);
+
+					if (expr_walker(stmt, elif->cond, context))
+						return true;
+
+					if (plpgsql_lint_expr_walker_list(func, elif->stmts, expr_walker, context))
+						return true;
+
+				}
+
+				return plpgsql_lint_expr_walker_list(func, stmt_if->else_body, expr_walker, context);
+
+#else
+				if (plpgsql_lint_expr_walker_list(func, stmt_if->true_body, expr_walker, context))
 					return true;
 
-				return plpgsql_expr_walker_list(func, stmt_if->false_body, expr_walker, context);
+				return plpgsql_lint_expr_walker_list(func, stmt_if->false_body, expr_walker, context);
+
+#endif
+
 			}
 
 		case PLPGSQL_STMT_CASE:
@@ -324,15 +352,15 @@ plpgsql_expr_walker(PLpgSQL_function *func,
 					if (expr_walker(stmt, cwt->expr, context))
 						return true;
 
-					if (plpgsql_expr_walker_list(func, cwt->stmts, expr_walker, context))
+					if (plpgsql_lint_expr_walker_list(func, cwt->stmts, expr_walker, context))
 						return true;
 				}
 
-				return plpgsql_expr_walker_list(func, stmt_case->else_stmts, expr_walker, context);
+				return plpgsql_lint_expr_walker_list(func, stmt_case->else_stmts, expr_walker, context);
 			}
 
 		case PLPGSQL_STMT_LOOP:
-			return plpgsql_expr_walker_list(func, ((PLpgSQL_stmt_loop *) stmt)->body, expr_walker, context);
+			return plpgsql_lint_expr_walker_list(func, ((PLpgSQL_stmt_loop *) stmt)->body, expr_walker, context);
 
 		case PLPGSQL_STMT_WHILE:
 			{
@@ -341,7 +369,7 @@ plpgsql_expr_walker(PLpgSQL_function *func,
 				if (expr_walker(stmt, stmt_while->cond, context))
 					return true;
 
-				return plpgsql_expr_walker_list(func, stmt_while->body, expr_walker, context);
+				return plpgsql_lint_expr_walker_list(func, stmt_while->body, expr_walker, context);
 			}
 
 		case PLPGSQL_STMT_FORI:
@@ -357,7 +385,7 @@ plpgsql_expr_walker(PLpgSQL_function *func,
 				if (expr_walker(stmt, stmt_fori->step, context))
 					return true;
 
-				return plpgsql_expr_walker_list(func, stmt_fori->body, expr_walker, context);
+				return plpgsql_lint_expr_walker_list(func, stmt_fori->body, expr_walker, context);
 			}
 
 		case PLPGSQL_STMT_FORS:
@@ -367,7 +395,7 @@ plpgsql_expr_walker(PLpgSQL_function *func,
 				if (expr_walker(stmt, stmt_fors->query, context))
 					return true;
 
-				return plpgsql_expr_walker_list(func, stmt_fors->body, expr_walker, context);
+				return plpgsql_lint_expr_walker_list(func, stmt_fors->body, expr_walker, context);
 			}
 
 		case PLPGSQL_STMT_FORC:
@@ -381,7 +409,7 @@ plpgsql_expr_walker(PLpgSQL_function *func,
 				if (expr_walker(stmt, var->cursor_explicit_expr, context))
 					return true;
 
-				return plpgsql_expr_walker_list(func, stmt_forc->body, expr_walker, context);
+				return plpgsql_lint_expr_walker_list(func, stmt_forc->body, expr_walker, context);
 			}
 
 		case PLPGSQL_STMT_DYNFORS:
@@ -397,7 +425,7 @@ plpgsql_expr_walker(PLpgSQL_function *func,
 						return true;
 				}
 
-				return plpgsql_expr_walker_list(func, stmt_dynfors->body, expr_walker, context);
+				return plpgsql_lint_expr_walker_list(func, stmt_dynfors->body, expr_walker, context);
 			}
 
 #if PG_VERSION_NUM >= 90100
@@ -409,7 +437,7 @@ plpgsql_expr_walker(PLpgSQL_function *func,
 				if (expr_walker(stmt, stmt_foreach_a->expr, context))
 					return true;
 
-				return plpgsql_expr_walker_list(func, stmt_foreach_a->body, expr_walker, context);
+				return plpgsql_lint_expr_walker_list(func, stmt_foreach_a->body, expr_walker, context);
 			}
 
 #endif
@@ -660,7 +688,19 @@ assign_result_desc(PLpgSQL_execstate *estate,
 		 * then we can try to derive a tupledes from function's
 		 * description.
 		 */
+
+#if PG_VERSION_NUM >= 90200
+
+		CachedPlan *cplan;
+
+		cplan = GetCachedPlan(plansource, NULL, true);
+		_stmt = (PlannedStmt *) linitial(cplan->stmt_list);
+
+#else
+
 		_stmt = (PlannedStmt *) linitial(plansource->plan->stmt_list);
+
+#endif
 
 		if (IsA(_stmt, PlannedStmt) && _stmt->commandType == CMD_SELECT)
 		{
@@ -691,6 +731,12 @@ assign_result_desc(PLpgSQL_execstate *estate,
 				}
 			}
 		}
+
+#if PG_VERSION_NUM >= 90200
+
+		ReleaseCachedPlan(cplan, true);
+
+#endif
 	}
 
 	/* last recheck */
@@ -725,7 +771,7 @@ assign_result_desc(PLpgSQL_execstate *estate,
  *
  */
 static bool
-plpgsql_expr_prepare_plan(PLpgSQL_stmt *stmt, PLpgSQL_expr *expr, void *context)
+plpgsql_lint_expr_prepare_plan(PLpgSQL_stmt *stmt, PLpgSQL_expr *expr, void *context)
 {
 	PLpgSQL_execstate *estate = (PLpgSQL_execstate *) context;
 	int cursorOptions = 0;
@@ -737,7 +783,6 @@ plpgsql_expr_prepare_plan(PLpgSQL_stmt *stmt, PLpgSQL_expr *expr, void *context)
 	/* overwrite a estate variables */
 	estate->err_text = NULL;
 	estate->err_stmt = stmt;
-
 
 	switch (stmt->cmd_type)
 	{

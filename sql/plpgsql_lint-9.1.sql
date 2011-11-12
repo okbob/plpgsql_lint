@@ -1,0 +1,1 @@
+/home/pavel/src/postgresql-9.0.5/contrib/plpgsql_lint/sql/plpgsql_lint-9.0.sql

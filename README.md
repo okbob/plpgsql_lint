@@ -1,10 +1,10 @@
 # PL/pgSQL lint
 
-A PostgreSQL's plpgsql interpret uses a two step checking. First step is syntax checking when
-function is validated - it is done when function's creation time or when function is executed
-first time in session. Second step - a deeper check of embedded SQL and expressions are done 
-when runtime when SQL or expression is evaluated first time in session. This step is slower and
-this technique eliminates a checking of SQL or expressions that evaluated never (but some errors
+A PostgreSQL's plpgsql interpreter uses a two step checking. First step is syntax checking when
+function is validated - it is done on function's creation time or when function is executed
+first time in a session. Second step - a deeper checks of embedded SQL and expressions are done 
+in runtime when SQL or expression is evaluated first time in a session. This step is slower and
+this technique eliminates checking of SQL or expressions that are never evaluated (but some errors
 can be found too late).
 
 plpgsql_lint ensures a deep validation of all embedded SQL and expressions (not only evaluated)
@@ -12,7 +12,7 @@ every time when function is started.
 
 
 ## Installation
- * copy source code to PostgreSQL's source code tree (8.4.x, 9.0.x, 9.1.x, [9.2.x]) - to _contrib_ directory
+ * copy the source code to PostgreSQL's source code tree (8.4.x, 9.0.x, 9.1.x, [9.2.x]) - to _contrib_ directory
  * compile it there and install it - _make; make install_
 
 ## Usage
@@ -44,7 +44,7 @@ every time when function is started.
     PL/pgSQL function "f1" line 5 at RAISE
 
 The function f1() can be executed successfully without active plpgsql_lint, because table t1
-is empty and RAISE statement will be executed never. When plpgsql_lint is active, then this
+is empty and RAISE statement will never be executed. When plpgsql_lint is active, then this
 badly written expression is identified.
 
 This module can be deactivated by setting
@@ -74,7 +74,7 @@ _A usage of plpgsql_lint does a small overhed and only develop or preprod enviro
 
 ### Dynamic SQL
 
-This module doesn't check a queries that are assembled in runtime. There are no possible
+This module doesn't check queries that are assembled in runtime. It is not possible
 to identify result of dynamic queries - so plpgsql_cannot to set correct type to record
 variables and cannot to check a dependent SQLs and expressions. Don't use record variable
 as target for dynamic queries or disable plpgsql_lint for functions that use a dynamic
@@ -82,7 +82,7 @@ queries.
 
 ### PL/pgSQL statements
 
-plpgsql_lint check only embedded SQL and expressions. It doesn't check a PL/pgSQL
+plpgsql_lint checks only embedded SQL and expressions. It doesn't check a PL/pgSQL
 statements. There are a few bugs that are not identified by syntax checking and plpgsql_lint
 too:
 

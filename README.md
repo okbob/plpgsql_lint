@@ -53,9 +53,9 @@ This module can be deactivated by setting
 
 ## Limits
 
-plpgsql_lint should to find all errors on really static code. When developer uses a some
-PLpgSQL's dynamic features like dynamic SQL or record data type, then a false alarms are
-possible. These alarms should be rare - in well written code - and then related function
+plpgsql_lint should find all errors on really static code. When developer uses some
+PLpgSQL's dynamic features like dynamic SQL or record data type, then false positives are
+possible. These should be rare - in well written code - and then the affected function
 should be redesigned or plpgsql_lint should be disabled for this function.
 
 
@@ -70,7 +70,7 @@ should be redesigned or plpgsql_lint should be disabled for this function.
     END;
     $$ LANGUAGE plpgsql SET plpgsql.enable_lint TO false;
 
-_A usage of plpgsql_lint does a small overhed and only develop or preprod environments are preffered._
+_A usage of plpgsql_lint adds a small overhead and you should use it only in develop or preprod environments._
 
 ### Dynamic SQL
 

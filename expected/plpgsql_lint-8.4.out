@@ -14,7 +14,7 @@ ERROR:  column "c" of relation "t1" does not exist
 LINE 1: update t1 set c = 30
                       ^
 QUERY:  update t1 set c = 30
-CONTEXT:  PL/pgSQL function "f1" line 4 at SQL statement
+CONTEXT:  PL/pgSQL function "f1" line 3 at SQL statement
 drop function f1();
 create function g1(out a int, out b int)
 as $$
@@ -32,8 +32,7 @@ end;
 $$ language plpgsql;
 select f1();
 ERROR:  record "r" has no field "c"
-CONTEXT:  SQL statement "SELECT r.c"
-PL/pgSQL function "f1" line 6 at RAISE
+CONTEXT:  PL/pgSQL function "f1" line 5 at RAISE
 drop function f1();
 drop function g1();
 create function g1(out a int, out b int)
@@ -52,8 +51,7 @@ end;
 $$ language plpgsql;
 select f1();
 ERROR:  record "r" has no field "c"
-CONTEXT:  SQL statement "SELECT r.c"
-PL/pgSQL function "f1" line 6 at RAISE
+CONTEXT:  PL/pgSQL function "f1" line 5 at RAISE
 /*
  * This is limit of current version, because a bug is 
  * in plpgsql statement, not in sql expression. Actually
@@ -90,8 +88,8 @@ end;
 $$ language plpgsql;
 select f1();
 ERROR:  column "a" does not exist
-LINE 1: SELECT a + b
-               ^
-QUERY:  SELECT a + b
-CONTEXT:  PL/pgSQL function "f1" line 5 at assignment
+LINE 1: SELECT  a + b
+                ^
+QUERY:  SELECT  a + b
+CONTEXT:  PL/pgSQL function "f1" line 4 at assignment
 drop function f1();

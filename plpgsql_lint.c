@@ -27,6 +27,14 @@ static bool plpgsql_lint_expr_walker(PLpgSQL_function *func,
 								void *context);
 static bool plpgsql_lint_expr_prepare_plan(PLpgSQL_stmt *stmt, PLpgSQL_expr *expr, void *context);
 
+#if PG_VERSION_NUM < 90000
+
+static Oid datum_get_typoid(PLpgSQL_execstate *estate,
+				    PLpgSQL_datum *datum);
+
+#endif
+
+
 static PLpgSQL_plugin plugin_funcs = { NULL, lint_func_beg, NULL, NULL, NULL};
 
 /*
@@ -149,6 +157,75 @@ lint_func_beg( PLpgSQL_execstate * estate, PLpgSQL_function * func )
 	}
 }
 
+#if PG_VERSION_NUM < 90000
+
+static Oid
+datum_get_typoid(PLpgSQL_execstate *estate,
+				    PLpgSQL_datum *datum)
+{
+	Oid typoid;
+
+	switch (datum->dtype)
+	{
+		case PLPGSQL_DTYPE_VAR:
+			typoid = ((PLpgSQL_var *) datum)->datatype->typoid;
+			break;
+
+		case PLPGSQL_DTYPE_ROW:
+			typoid = ((PLpgSQL_row *) datum)->rowtupdesc->tdtypeid;
+			break;
+
+		case PLPGSQL_DTYPE_REC:
+			{
+				PLpgSQL_rec *rec = (PLpgSQL_rec *) datum;
+
+				if (!HeapTupleIsValid(rec->tup))
+					ereport(ERROR,
+						  (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						   errmsg("record \"%s\" is not assigned yet",
+								  rec->refname),
+						   errdetail("The tuple structure of a not-yet-assigned record is indeterminate.")));
+				Assert(rec->tupdesc != NULL);
+				/* Make sure we have a valid type/typmod setting */
+				BlessTupleDesc(rec->tupdesc);
+
+				typoid = rec->tupdesc->tdtypeid;
+			}
+			break;
+
+		case PLPGSQL_DTYPE_RECFIELD:
+			{
+				PLpgSQL_recfield *recfield = (PLpgSQL_recfield *) datum;
+				PLpgSQL_rec *rec;
+				int			fno;
+
+				rec = (PLpgSQL_rec *) (estate->datums[recfield->recparentno]);
+				if (!HeapTupleIsValid(rec->tup))
+					ereport(ERROR,
+						  (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						   errmsg("record \"%s\" is not assigned yet",
+								  rec->refname),
+						   errdetail("The tuple structure of a not-yet-assigned record is indeterminate.")));
+				fno = SPI_fnumber(rec->tupdesc, recfield->fieldname);
+				if (fno == SPI_ERROR_NOATTRIBUTE)
+					ereport(ERROR,
+							(errcode(ERRCODE_UNDEFINED_COLUMN),
+							 errmsg("record \"%s\" has no field \"%s\"",
+									rec->refname, recfield->fieldname)));
+				typoid = SPI_gettypeid(rec->tupdesc, fno);
+			}
+			break;
+
+		case PLPGSQL_DTYPE_TRIGARG:
+			typoid = TEXTOID;
+			break;
+	}
+
+	return typoid;
+}
+
+#endif
+
 
 /* ----------
  * Generate a prepared plan - this is copy from pl_exec.c
@@ -158,6 +235,8 @@ static void
 exec_prepare_plan(PLpgSQL_execstate *estate,
 				  PLpgSQL_expr *expr, int cursorOptions)
 {
+#if PG_VERSION_NUM >= 90000
+
 	SPIPlanPtr	plan;
 
 	/*
@@ -192,8 +271,61 @@ exec_prepare_plan(PLpgSQL_execstate *estate,
 					 expr->query, SPI_result_code_string(SPI_result));
 		}
 	}
+
 	expr->plan = SPI_saveplan(plan);
 	SPI_freeplan(plan);
+
+#else
+
+	int			i;
+	SPIPlanPtr	plan;
+	Oid		   *argtypes;
+
+	/*
+	 * We need a temporary argtypes array to load with data. (The finished
+	 * plan structure will contain a copy of it.)
+	 */
+	argtypes = (Oid *) palloc(expr->nparams * sizeof(Oid));
+
+	for (i = 0; i < expr->nparams; i++)
+	{
+		argtypes[i] = datum_get_typoid(estate, estate->datums[expr->params[i]]);
+	}
+
+	/*
+	 * Generate and save the plan
+	 */
+	plan = SPI_prepare_cursor(expr->query, expr->nparams, argtypes,
+							  cursorOptions);
+	if (plan == NULL)
+	{
+		/* Some SPI errors deserve specific error messages */
+		switch (SPI_result)
+		{
+			case SPI_ERROR_COPY:
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot COPY to/from client in PL/pgSQL")));
+			case SPI_ERROR_TRANSACTION:
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot begin/end transactions in PL/pgSQL"),
+						 errhint("Use a BEGIN block with an EXCEPTION clause instead.")));
+			default:
+				elog(ERROR, "SPI_prepare_cursor failed for \"%s\": %s",
+					 expr->query, SPI_result_code_string(SPI_result));
+		}
+	}
+
+	expr->plan = SPI_saveplan(plan);
+	SPI_freeplan(plan);
+	plan = expr->plan;
+	expr->plan_argtypes = plan->argtypes;
+
+	pfree(argtypes);
+
+#endif
+
 }
 
 /*
@@ -532,6 +664,8 @@ plpgsql_lint_expr_walker(PLpgSQL_function *func,
 				if (expr_walker(stmt, stmt_open->argquery, context))
 					return true;
 
+#if PG_VERSION_NUM >= 90000
+
 				foreach(l, stmt_open->params)
 				{
 					if (expr_walker(stmt, (PLpgSQL_expr *) lfirst(l), context))
@@ -539,6 +673,9 @@ plpgsql_lint_expr_walker(PLpgSQL_function *func,
 				}
 
 				return false;
+
+#endif
+
 			}
 
 		case PLPGSQL_STMT_FETCH:

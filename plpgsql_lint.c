@@ -179,7 +179,6 @@ lint_func_beg( PLpgSQL_execstate * estate, PLpgSQL_function * func )
 	}
 }
 
-<<<<<<< HEAD
 /*
  * Verify lvalue - actually this not compare lvalue against rvalue - that should
  * be next improvent, other improvent should be checking a result type of subscripts
@@ -325,15 +324,6 @@ exec_get_datum_type(PLpgSQL_execstate *estate,
 				    PLpgSQL_datum *datum)
 {
 	Oid typoid = InvalidOid;
-=======
-#if PG_VERSION_NUM < 90000
-
-static Oid
-datum_get_typoid(PLpgSQL_execstate *estate,
-				    PLpgSQL_datum *datum)
-{
-	Oid typoid;
->>>>>>> 007cfe2f8998aa59a59a47f8828f6eed0590b399
 
 	switch (datum->dtype)
 	{
@@ -442,55 +432,6 @@ exec_prepare_plan(PLpgSQL_execstate *estate,
 		}
 	}
 
-<<<<<<< HEAD
-	expr->plan = SPI_saveplan(plan);
-	SPI_freeplan(plan);
-
-#else
-
-	int			i;
-	SPIPlanPtr	plan;
-	Oid		   *argtypes;
-
-	/*
-	 * We need a temporary argtypes array to load with data. (The finished
-	 * plan structure will contain a copy of it.)
-	 */
-	argtypes = (Oid *) palloc(expr->nparams * sizeof(Oid));
-
-	for (i = 0; i < expr->nparams; i++)
-	{
-		argtypes[i] = exec_get_datum_type(estate, estate->datums[expr->params[i]]);
-	}
-
-	/*
-	 * Generate and save the plan
-	 */
-	plan = SPI_prepare_cursor(expr->query, expr->nparams, argtypes,
-							  cursorOptions);
-	if (plan == NULL)
-	{
-		/* Some SPI errors deserve specific error messages */
-		switch (SPI_result)
-		{
-			case SPI_ERROR_COPY:
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("cannot COPY to/from client in PL/pgSQL")));
-			case SPI_ERROR_TRANSACTION:
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("cannot begin/end transactions in PL/pgSQL"),
-						 errhint("Use a BEGIN block with an EXCEPTION clause instead.")));
-			default:
-				elog(ERROR, "SPI_prepare_cursor failed for \"%s\": %s",
-					 expr->query, SPI_result_code_string(SPI_result));
-		}
-	}
-
-	expr->plan = SPI_saveplan(plan);
-	SPI_freeplan(plan);
-=======
 	expr->plan = SPI_saveplan(plan);
 	SPI_freeplan(plan);
 
@@ -538,9 +479,6 @@ exec_prepare_plan(PLpgSQL_execstate *estate,
 
 	expr->plan = SPI_saveplan(plan);
 	SPI_freeplan(plan);
->>>>>>> 007cfe2f8998aa59a59a47f8828f6eed0590b399
-	plan = expr->plan;
-	expr->plan_argtypes = plan->argtypes;
 
 	pfree(argtypes);
 

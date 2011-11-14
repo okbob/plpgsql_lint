@@ -26,10 +26,17 @@ static bool plpgsql_lint_expr_walker(PLpgSQL_function *func,
 					bool (*expr_walker)(),
 								void *context);
 static bool plpgsql_lint_expr_prepare_plan(PLpgSQL_stmt *stmt, PLpgSQL_expr *expr, void *context);
+static bool check_target(PLpgSQL_stmt *stmt, int varno,
+				bool (*expr_walker)(),
+						void *context);
+static bool check_row(PLpgSQL_stmt *stmt, int dno,
+				bool (*expr_walker)(),
+						void *context);
+
 
 #if PG_VERSION_NUM < 90000
 
-static Oid datum_get_typoid(PLpgSQL_execstate *estate,
+static Oid exec_get_datum_type(PLpgSQL_execstate *estate,
 				    PLpgSQL_datum *datum);
 
 #endif
@@ -164,10 +171,148 @@ lint_func_beg( PLpgSQL_execstate * estate, PLpgSQL_function * func )
 	}
 }
 
+/*
+ * Verify lvalue - actually this not compare lvalue against rvalue - that should
+ * be next improvent, other improvent should be checking a result type of subscripts
+ * expressions.
+ */
+static bool
+check_target(PLpgSQL_stmt *stmt, int varno,
+			    bool (*expr_walker)(),
+						void *context)
+{
+	PLpgSQL_execstate *estate = (PLpgSQL_execstate *) context;
+	PLpgSQL_datum *target = estate->datums[varno];
+
+	switch (target->dtype)
+	{
+		case PLPGSQL_DTYPE_VAR:
+		case PLPGSQL_DTYPE_REC:
+			return false;
+
+		case PLPGSQL_DTYPE_ROW:
+			{
+				PLpgSQL_row *row = (PLpgSQL_row *) target;
+
+				if (check_row(stmt, row->dno, expr_walker, context))
+					return true;
+			}
+			break;
+
+		case PLPGSQL_DTYPE_RECFIELD:
+			{
+				PLpgSQL_recfield *recfield = (PLpgSQL_recfield *) target;
+				PLpgSQL_rec *rec;
+				int			fno;
+
+				rec = (PLpgSQL_rec *) (estate->datums[recfield->recparentno]);
+
+				/*
+				 * Check that there is already a tuple in the record. We need
+				 * that because records don't have any predefined field
+				 * structure.
+				 */
+				if (!HeapTupleIsValid(rec->tup))
+					ereport(ERROR,
+						  (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						   errmsg("record \"%s\" is not assigned yet",
+								  rec->refname),
+						   errdetail("The tuple structure of a not-yet-assigned record is indeterminate.")));
+
+				/*
+				 * Get the number of the records field to change and the
+				 * number of attributes in the tuple.  Note: disallow system
+				 * column names because the code below won't cope.
+				 */
+				fno = SPI_fnumber(rec->tupdesc, recfield->fieldname);
+				if (fno <= 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_UNDEFINED_COLUMN),
+							 errmsg("record \"%s\" has no field \"%s\"",
+									rec->refname, recfield->fieldname)));
+			}
+			break;
+
+		case PLPGSQL_DTYPE_ARRAYELEM:
+			{
+				/*
+				 * Target is an element of an array
+				 */
+				int			nsubscripts;
+				Oid		arrayelemtypeid;
+
+				/*
+				 * To handle constructs like x[1][2] := something, we have to
+				 * be prepared to deal with a chain of arrayelem datums. Chase
+				 * back to find the base array datum, and save the subscript
+				 * expressions as we go.  (We are scanning right to left here,
+				 * but want to evaluate the subscripts left-to-right to
+				 * minimize surprises.)
+				 */
+				nsubscripts = 0;
+				do
+				{
+					PLpgSQL_arrayelem *arrayelem = (PLpgSQL_arrayelem *) target;
+
+					if (nsubscripts++ >= MAXDIM)
+						ereport(ERROR,
+								(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+								 errmsg("number of array dimensions (%d) exceeds the maximum allowed (%d)",
+										nsubscripts + 1, MAXDIM)));
+
+					if (expr_walker(stmt, arrayelem->subscript, context))
+						return true;
+										
+					target = estate->datums[arrayelem->arrayparentno];
+				} while (target->dtype == PLPGSQL_DTYPE_ARRAYELEM);
+
+				arrayelemtypeid = get_element_type(exec_get_datum_type(estate, target));
+
+				if (!OidIsValid(arrayelemtypeid))
+					ereport(ERROR,
+							(errcode(ERRCODE_DATATYPE_MISMATCH),
+							 errmsg("subscripted object is not an array")));
+			}
+			break;
+	}
+
+	return false;
+}
+
+/*
+ * Check composed lvalue
+ */
+static bool
+check_row(PLpgSQL_stmt *stmt, int dno,
+			    bool (*expr_walker)(),
+						void *context)
+{
+	PLpgSQL_execstate *estate = (PLpgSQL_execstate *) context;
+	PLpgSQL_row *row;
+	int fnum;
+
+	row = (PLpgSQL_row *) (estate->datums[dno]);
+
+	for (fnum = 0; fnum < row->nfields; fnum++)
+	{
+		if (row->varnos[fnum] < 0)
+			continue;
+	
+		if (check_target(stmt, row->varnos[fnum],
+						expr_walker, context))
+			return true;
+	}
+
+	return false;
+}
+
 #if PG_VERSION_NUM < 90000
 
+/*
+ * Similar function exec_get_datum_type is in 9nth line
+ */
 static Oid
-datum_get_typoid(PLpgSQL_execstate *estate,
+exec_get_datum_type(PLpgSQL_execstate *estate,
 				    PLpgSQL_datum *datum)
 {
 	Oid typoid;
@@ -296,7 +441,7 @@ exec_prepare_plan(PLpgSQL_execstate *estate,
 
 	for (i = 0; i < expr->nparams; i++)
 	{
-		argtypes[i] = datum_get_typoid(estate, estate->datums[expr->params[i]]);
+		argtypes[i] = exec_get_datum_type(estate, estate->datums[expr->params[i]]);
 	}
 
 	/*
@@ -434,7 +579,21 @@ plpgsql_lint_expr_walker(PLpgSQL_function *func,
 			}
 
 		case PLPGSQL_STMT_ASSIGN:
-			return expr_walker(stmt, ((PLpgSQL_stmt_assign *) stmt)->expr, context);
+			{
+				PLpgSQL_stmt_assign *stmt_assign = (PLpgSQL_stmt_assign *) stmt;
+
+				/*
+				 * don't repeat a check target, validate it,
+				 * only when there are no cached plan - first call
+				 */
+				if (stmt_assign->expr->plan == NULL)
+				{
+					if (check_target(stmt, stmt_assign->varno, expr_walker, context))
+						return true;
+				}
+
+				return expr_walker(stmt, stmt_assign->expr, context);
+			}
 
 		case PLPGSQL_STMT_IF:
 			{
@@ -534,6 +693,12 @@ plpgsql_lint_expr_walker(PLpgSQL_function *func,
 				if (expr_walker(stmt, stmt_fors->query, context))
 					return true;
 
+				if (stmt_fors->query->plan == NULL && stmt_fors->row != NULL)
+				{
+					if (check_row(stmt, stmt_fors->row->dno, expr_walker, context))
+						return true;
+				}
+
 				return plpgsql_lint_expr_walker_list(func, stmt_fors->body, expr_walker, context);
 			}
 
@@ -548,6 +713,12 @@ plpgsql_lint_expr_walker(PLpgSQL_function *func,
 				if (expr_walker(stmt, var->cursor_explicit_expr, context))
 					return true;
 
+				if (var->cursor_explicit_expr->plan == NULL && stmt_forc->row != NULL)
+				{
+					if (check_row(stmt, stmt_forc->row->dno, expr_walker, context))
+						return true;
+				}
+
 				return plpgsql_lint_expr_walker_list(func, stmt_forc->body, expr_walker, context);
 			}
 
@@ -561,6 +732,12 @@ plpgsql_lint_expr_walker(PLpgSQL_function *func,
 				foreach(l, stmt_dynfors->params)
 				{
 					if (expr_walker(stmt, (PLpgSQL_expr *) lfirst(l), context))
+						return true;
+				}
+
+				if (stmt_dynfors->query->plan == NULL && stmt_dynfors->row != NULL)
+				{
+					if (check_row(stmt, stmt_dynfors->row->dno, expr_walker, context))
 						return true;
 				}
 
@@ -628,12 +805,26 @@ plpgsql_lint_expr_walker(PLpgSQL_function *func,
 				}
 
 				return expr_walker(stmt, NULL, context);
+			}
+			break;
+
+		case PLPGSQL_STMT_EXECSQL:
+			{
+				PLpgSQL_stmt_execsql *stmt_execsql = (PLpgSQL_stmt_execsql *) stmt;
+
+				if (expr_walker(stmt, stmt_execsql->sqlstmt, context))
+					return true;
+
+				if (stmt_execsql->sqlstmt->plan == NULL && stmt_execsql->into 
+									    && stmt_execsql->row != NULL)
+				{
+					if (check_row(stmt, stmt_execsql->row->dno, expr_walker, context))
+						return true;
+				}
 
 				return false;
 			}
-
-		case PLPGSQL_STMT_EXECSQL:
-			return expr_walker(stmt, ((PLpgSQL_stmt_execsql *) stmt)->sqlstmt, context);
+			break;
 
 		case PLPGSQL_STMT_DYNEXECUTE:
 			{
@@ -648,12 +839,33 @@ plpgsql_lint_expr_walker(PLpgSQL_function *func,
 						return true;
 				}
 
+				if (stmt_dynexecute->query->plan == NULL && stmt_dynexecute->into
+									    && stmt_dynexecute->row != NULL)
+				{
+					if (check_row(stmt, stmt_dynexecute->row->dno, expr_walker, context))
+						return true;
+				}
+
 				return false;
 			}
 			break;
 
 		case PLPGSQL_STMT_GETDIAG:
-			return false;
+			{
+				ListCell *lc;
+				PLpgSQL_stmt_getdiag *stmt_getdiag = (PLpgSQL_stmt_getdiag *) stmt;
+
+				foreach(lc, stmt_getdiag->diag_items)
+				{
+					PLpgSQL_diag_item *diag_item = (PLpgSQL_diag_item *) lfirst(lc);
+
+					if (check_target(stmt, diag_item->target, expr_walker, context))
+						return true;
+				}
+
+				return false;
+			}
+			break;
 
 		case PLPGSQL_STMT_OPEN:
 			{
@@ -688,7 +900,18 @@ plpgsql_lint_expr_walker(PLpgSQL_function *func,
 			}
 
 		case PLPGSQL_STMT_FETCH:
-			return expr_walker(stmt, NULL, context);
+			{
+				PLpgSQL_stmt_fetch *stmt_fetch = (PLpgSQL_stmt_fetch *) stmt;
+
+				if (!stmt_fetch && stmt_fetch->row != NULL)
+				{
+					if (check_row(stmt, stmt_fetch->row->dno, expr_walker, context))
+						return true;
+				}
+
+				return expr_walker(stmt, NULL, context);
+			}
+			break;
 
 		case PLPGSQL_STMT_CLOSE:
 			return false;

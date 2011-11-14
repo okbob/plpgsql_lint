@@ -55,11 +55,6 @@ $$ language plpgsql;
 
 select f1();
 
-/*
- * This is limit of current version, because a bug is 
- * in plpgsql statement, not in sql expression. Actually
- * statements are not checked.
- */
 create or replace function f1()
 returns void as $$
 declare r record;
@@ -71,7 +66,6 @@ begin
 end;
 $$ language plpgsql;
 
--- doesn't raise error
 select f1();
 
 drop function f1();
@@ -105,3 +99,44 @@ select f1();
 
 drop function f1();
 
+create or replace function f1()
+returns void as $$
+begin
+  if false then
+    raise notice '% %';
+  end if;
+end;
+$$ language plpgsql;
+
+select f1();
+
+drop function f1();
+
+create or replace function f1()
+returns void as $$
+declare r int[];
+begin
+  if false then
+    r[c+10] := 20;
+  end if;
+end;
+$$ language plpgsql;
+
+select f1();
+
+drop function f1();
+
+
+create or replace function f1()
+returns void as $$
+declare r int;
+begin
+  if false then
+    r[10] := 20;
+  end if;
+end;
+$$ language plpgsql;
+
+select f1();
+
+drop function f1();

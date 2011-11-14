@@ -8,6 +8,7 @@ ifndef MAJORVERSION
 MAJORVERSION := $(basename $(VERSION))
 endif
 
+REGRESS_OPTS = --dbname=$(PL_TESTDB) --load-language=plpgsql
 REGRESS = plpgsql_lint-$(MAJORVERSION)
 
 ifdef USE_PGXS

@@ -146,8 +146,7 @@ create type diagnostic_info_type as (
   row_count int);
 create or replace function f1()
 returns void as $$
-declare
-  dg record;
+declare  dg record;
 begin
   dg := NULL::diagnostic_info_type;
   if false then
@@ -158,5 +157,5 @@ end;
 $$ language plpgsql;
 select f1();
 ERROR:  record "dg" has no field "mistake"
-CONTEXT:  PL/pgSQL function "f1" line 7 at assignment
+CONTEXT:  PL/pgSQL function "f1" line 6 at assignment
 drop function f1();

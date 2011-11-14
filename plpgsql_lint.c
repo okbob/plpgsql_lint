@@ -963,31 +963,36 @@ plpgsql_lint_expr_prepare_plan(PLpgSQL_stmt *stmt, PLpgSQL_expr *expr, void *con
 					PLpgSQL_stmt_raise *stmt_raise = (PLpgSQL_stmt_raise *) stmt;
 					char *cp;
 
-					/* ensure any single % has a own parameter */
 					current_param = list_head(stmt_raise->params);
 
-					for (cp = stmt_raise->message; *cp; cp++)
+					/* we can skip this test, when we identify a second loop */
+					if (!(current_param != NULL && (((PLpgSQL_expr *) lfirst(current_param))->plan != NULL)))
 					{
-						if (cp[0] == '%')
+						/* ensure any single % has a own parameter */
+						for (cp = stmt_raise->message; *cp; cp++)
 						{
-							if (cp[1] == '%')
+							if (cp[0] == '%')
 							{
-								cp++;
-								continue;
+								if (cp[1] == '%')
+								{
+									cp++;
+									continue;
+								}
 							}
+
+							if (current_param == NULL)
+								ereport(ERROR,
+										(errcode(ERRCODE_SYNTAX_ERROR),
+									errmsg("too few parameters specified for RAISE")));
+
+							current_param = lnext(current_param);
 						}
 
-						if (current_param == NULL)
+						if (current_param != NULL)
 							ereport(ERROR,
 									(errcode(ERRCODE_SYNTAX_ERROR),
-								errmsg("too few parameters specified for RAISE")));
-
-						current_param = lnext(current_param);
+									 errmsg("too many parameters specified for RAISE")));
 					}
-					if (current_param != NULL)
-						ereport(ERROR,
-								(errcode(ERRCODE_SYNTAX_ERROR),
-								 errmsg("too many parameters specified for RAISE")));
 				}
 			}
 			break;

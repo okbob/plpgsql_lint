@@ -42,14 +42,6 @@ static Oid exec_get_datum_type(PLpgSQL_execstate *estate,
 #endif
 
 
-#if PG_VERSION_NUM < 90000
-
-static Oid datum_get_typoid(PLpgSQL_execstate *estate,
-				    PLpgSQL_datum *datum);
-
-#endif
-
-
 static PLpgSQL_plugin plugin_funcs = { NULL, lint_func_beg, NULL, NULL, NULL};
 
 /*
@@ -449,7 +441,7 @@ exec_prepare_plan(PLpgSQL_execstate *estate,
 
 	for (i = 0; i < expr->nparams; i++)
 	{
-		argtypes[i] = datum_get_typoid(estate, estate->datums[expr->params[i]]);
+		argtypes[i] = exec_get_datum_type(estate, estate->datums[expr->params[i]]);
 	}
 
 	/*

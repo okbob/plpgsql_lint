@@ -55,6 +55,14 @@ $$ language plpgsql;
 
 select f1();
 
+<<<<<<< HEAD
+=======
+/*
+ * This is limit of current version, because a bug is 
+ * in plpgsql statement, not in sql expression. Actually
+ * statements are not checked.
+ */
+>>>>>>> 007cfe2f8998aa59a59a47f8828f6eed0590b399
 create or replace function f1()
 returns void as $$
 declare r record;
@@ -66,6 +74,10 @@ begin
 end;
 $$ language plpgsql;
 
+<<<<<<< HEAD
+=======
+-- doesn't raise error
+>>>>>>> 007cfe2f8998aa59a59a47f8828f6eed0590b399
 select f1();
 
 drop function f1();
@@ -86,6 +98,7 @@ select f1();
 
 drop function f1();
 
+<<<<<<< HEAD
 create or replace function f1()
 returns void as $$
 begin
@@ -163,3 +176,6 @@ $$ language plpgsql;
 select f1();
 
 drop function f1();
+=======
+
+>>>>>>> 007cfe2f8998aa59a59a47f8828f6eed0590b399

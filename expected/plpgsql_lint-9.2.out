@@ -54,6 +54,14 @@ select f1();
 ERROR:  record "r" has no field "c"
 CONTEXT:  SQL statement "SELECT r.c"
 PL/pgSQL function "f1" line 6 at RAISE
+<<<<<<< HEAD
+=======
+/*
+ * This is limit of current version, because a bug is 
+ * in plpgsql statement, not in sql expression. Actually
+ * statements are not checked.
+ */
+>>>>>>> 007cfe2f8998aa59a59a47f8828f6eed0590b399
 create or replace function f1()
 returns void as $$
 declare r record;
@@ -64,9 +72,19 @@ begin
   end loop;
 end;
 $$ language plpgsql;
+<<<<<<< HEAD
 select f1();
 ERROR:  record "r" has no field "c"
 CONTEXT:  PL/pgSQL function "f1" line 4 at FOR over SELECT rows
+=======
+-- doesn't raise error
+select f1();
+ f1 
+----
+ 
+(1 row)
+
+>>>>>>> 007cfe2f8998aa59a59a47f8828f6eed0590b399
 drop function f1();
 drop function g1();
 create function f1()
@@ -86,6 +104,7 @@ LINE 1: SELECT a + b
 QUERY:  SELECT a + b
 CONTEXT:  PL/pgSQL function "f1" line 5 at assignment
 drop function f1();
+<<<<<<< HEAD
 create or replace function f1()
 returns void as $$
 begin
@@ -161,3 +180,5 @@ select f1();
 ERROR:  record "_exception" has no field "hint"
 CONTEXT:  PL/pgSQL function "f1" line 5 at assignment
 drop function f1();
+=======
+>>>>>>> 007cfe2f8998aa59a59a47f8828f6eed0590b399

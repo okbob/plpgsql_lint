@@ -1,8 +1,6 @@
 load 'plpgsql';
 load 'plpgsql_lint';
-
 create table t1(a int, b int);
-
 create function f1()
 returns void as $$
 begin
@@ -11,16 +9,17 @@ begin
   end if;
 end;
 $$ language plpgsql;
-
 select f1();
-
+ERROR:  column "c" of relation "t1" does not exist
+LINE 1: update t1 set c = 30
+                      ^
+QUERY:  update t1 set c = 30
+CONTEXT:  PL/pgSQL function "f1" line 3 at SQL statement
 drop function f1();
-
 create function g1(out a int, out b int)
 as $$
   select 10,20;
 $$ language sql;
-
 create function f1()
 returns void as $$
 declare r record;
@@ -31,17 +30,15 @@ begin
   end if;
 end;
 $$ language plpgsql;
-
 select f1();
-
+ERROR:  record "r" has no field "c"
+CONTEXT:  PL/pgSQL function "f1" line 5 at RAISE
 drop function f1();
 drop function g1();
-
 create function g1(out a int, out b int)
 returns setof record as $$
 select * from t1;
 $$ language sql;
-
 create function f1()
 returns void as $$
 declare r record;
@@ -52,9 +49,9 @@ begin
   end loop;
 end;
 $$ language plpgsql;
-
 select f1();
-
+ERROR:  record "r" has no field "c"
+CONTEXT:  PL/pgSQL function "f1" line 5 at RAISE
 /*
  * This is limit of current version, because a bug is 
  * in plpgsql statement, not in sql expression. Actually
@@ -70,13 +67,15 @@ begin
   end loop;
 end;
 $$ language plpgsql;
-
 -- doesn't raise error
 select f1();
+ f1 
+----
+ 
+(1 row)
 
 drop function f1();
 drop function g1();
-
 create function f1()
 returns int as $$
 declare r int;
@@ -87,9 +86,10 @@ begin
   return r;
 end;
 $$ language plpgsql;
-
 select f1();
-
+ERROR:  column "a" does not exist
+LINE 1: SELECT  a + b
+                ^
+QUERY:  SELECT  a + b
+CONTEXT:  PL/pgSQL function "f1" line 4 at assignment
 drop function f1();
-
-

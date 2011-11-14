@@ -315,7 +315,7 @@ static Oid
 exec_get_datum_type(PLpgSQL_execstate *estate,
 				    PLpgSQL_datum *datum)
 {
-	Oid typoid;
+	Oid typoid = InvalidOid;
 
 	switch (datum->dtype)
 	{

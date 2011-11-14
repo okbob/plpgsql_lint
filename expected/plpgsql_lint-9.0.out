@@ -54,11 +54,6 @@ select f1();
 ERROR:  record "r" has no field "c"
 CONTEXT:  SQL statement "SELECT r.c"
 PL/pgSQL function "f1" line 5 at RAISE
-/*
- * This is limit of current version, because a bug is 
- * in plpgsql statement, not in sql expression. Actually
- * statements are not checked.
- */
 create or replace function f1()
 returns void as $$
 declare r record;
@@ -69,13 +64,9 @@ begin
   end loop;
 end;
 $$ language plpgsql;
--- doesn't raise error
 select f1();
- f1 
-----
- 
-(1 row)
-
+ERROR:  record "r" has no field "c"
+CONTEXT:  PL/pgSQL function "f1" line 3 at FOR over SELECT rows
 drop function f1();
 drop function g1();
 create function f1()
@@ -94,4 +85,78 @@ LINE 1: SELECT a + b
                ^
 QUERY:  SELECT a + b
 CONTEXT:  PL/pgSQL function "f1" line 4 at assignment
+drop function f1();
+create or replace function f1()
+returns void as $$
+begin
+  if false then
+    raise notice '%', 1, 2;
+  end if;
+end;
+$$ language plpgsql;
+select f1();
+ERROR:  too many parameters specified for RAISE
+CONTEXT:  PL/pgSQL function "f1" line 3 at RAISE
+drop function f1();
+create or replace function f1()
+returns void as $$
+begin
+  if false then
+    raise notice '% %';
+  end if;
+end;
+$$ language plpgsql;
+select f1();
+ERROR:  too few parameters specified for RAISE
+CONTEXT:  PL/pgSQL function "f1" line 3 at RAISE
+drop function f1();
+create or replace function f1()
+returns void as $$
+declare r int[];
+begin
+  if false then
+    r[c+10] := 20;
+  end if;
+end;
+$$ language plpgsql;
+select f1();
+ERROR:  column "c" does not exist
+LINE 1: SELECT c+10
+               ^
+QUERY:  SELECT c+10
+CONTEXT:  PL/pgSQL function "f1" line 4 at assignment
+drop function f1();
+create or replace function f1()
+returns void as $$
+declare r int;
+begin
+  if false then
+    r[10] := 20;
+  end if;
+end;
+$$ language plpgsql;
+select f1();
+ERROR:  subscripted object is not an array
+CONTEXT:  PL/pgSQL function "f1" line 4 at assignment
+drop function f1();
+create type diagnostic_info_type as (
+  status text,
+  message text,
+  detail text,
+  row_count int);
+create or replace function f1()
+returns void as $$
+declare
+  dg record;
+begin
+  dg := NULL::diagnostic_info_type;
+  if false then
+    dg.status := '00000';
+    dg.mistake := 'hello';
+  end if;
+end;
+$$ language plpgsql;
+select f1();
+ERROR:  record "dg" has no field "mistake"
+CONTEXT:  PL/pgSQL function "f1" line 6 at assignment
 drop function f1();

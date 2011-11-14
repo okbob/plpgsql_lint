@@ -63,7 +63,7 @@ should be redesigned or plpgsql_lint should be disabled for this function.
     RETURNS void AS $$
     DECLARE r record;
     BEGIN
-      FOR r IN SELECT * FROM t1
+      FOR r IN EXECUTE 'SELECT * FROM t1'
       LOOP
         RAISE NOTICE '%', r.c;
       END LOOP;
@@ -79,15 +79,6 @@ to identify result of dynamic queries - so plpgsql_cannot to set correct type to
 variables and cannot to check a dependent SQLs and expressions. Don't use record variable
 as target for dynamic queries or disable plpgsql_lint for functions that use a dynamic
 queries.
-
-### PL/pgSQL statements
-
-plpgsql_lint check only embedded SQL and expressions. It doesn't check a PL/pgSQL
-statements. There are a few bugs that are not identified by syntax checking and plpgsql_lint
-too:
-
-    RAISE NOTICE '% %', var1, var2, var3; -- three variables instead two
-                                          -- plpgsql_lint is blind in this case :(
 
 ## Licence
 

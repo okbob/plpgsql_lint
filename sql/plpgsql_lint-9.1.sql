@@ -140,3 +140,26 @@ $$ language plpgsql;
 select f1();
 
 drop function f1();
+
+create type diagnostic_info_type as (
+  status text,
+  message text,
+  detail text,
+  row_count int);
+
+create or replace function f1()
+returns void as $$
+declare
+  dg record;
+begin
+  dg := NULL::diagnostic_info_type;
+  if false then
+    dg.status := '00000';
+    dg.mistake := 'hello';
+  end if;
+end;
+$$ language plpgsql;
+
+select f1();
+
+drop function f1();

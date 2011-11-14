@@ -80,18 +80,6 @@ variables and cannot to check a dependent SQLs and expressions. Don't use record
 as target for dynamic queries or disable plpgsql_lint for functions that use a dynamic
 queries.
 
-<<<<<<< HEAD
-=======
-### PL/pgSQL statements
-
-plpgsql_lint checks only embedded SQL and expressions. It doesn't check a PL/pgSQL
-statements. There are a few bugs that are not identified by syntax checking and plpgsql_lint
-too:
-
-    RAISE NOTICE '% %', var1, var2, var3; -- three variables instead two
-                                          -- plpgsql_lint is blind in this case :(
-
->>>>>>> 007cfe2f8998aa59a59a47f8828f6eed0590b399
 ## Licence
 
 Copyright (c) Pavel Stehule (pavel.stehule@gmail.com)

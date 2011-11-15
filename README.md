@@ -7,7 +7,7 @@ in runtime when SQL or expression is evaluated first time in a session. This ste
 this technique eliminates checking of SQL or expressions that are never evaluated (but some errors
 can be found too late).
 
-plpgsql_lint ensures a deep validation of all embedded SQL and expressions (not only evaluated)
+_plpgsql_lint_ ensures a deep validation of all embedded SQL and expressions (not only evaluated)
 every time when function is started.
 
 
@@ -43,8 +43,8 @@ every time when function is started.
     CONTEXT:  SQL statement "SELECT r.c"
     PL/pgSQL function "f1" line 5 at RAISE
 
-The function f1() can be executed successfully without active plpgsql_lint, because table t1
-is empty and RAISE statement will never be executed. When plpgsql_lint is active, then this
+The function f1() can be executed successfully without active _plpgsql_lint_, because table t1
+is empty and RAISE statement will never be executed. When _plpgsql_lint_ is active, then this
 badly written expression is identified.
 
 This module can be deactivated by setting
@@ -53,7 +53,7 @@ This module can be deactivated by setting
 
 ## Limits
 
-plpgsql_lint should find all errors on really static code. When developer uses some
+_plpgsql_lint_ should find almost all errors on really static code. When developer uses some
 PLpgSQL's dynamic features like dynamic SQL or record data type, then false positives are
 possible. These should be rare - in well written code - and then the affected function
 should be redesigned or plpgsql_lint should be disabled for this function.
@@ -75,10 +75,14 @@ _A usage of plpgsql_lint adds a small overhead and you should use it only in dev
 ### Dynamic SQL
 
 This module doesn't check queries that are assembled in runtime. It is not possible
-to identify result of dynamic queries - so plpgsql_cannot to set correct type to record
+to identify result of dynamic queries - so _plpgsql_lint_ cannot to set correct type to record
 variables and cannot to check a dependent SQLs and expressions. Don't use record variable
-as target for dynamic queries or disable plpgsql_lint for functions that use a dynamic
+as target for dynamic queries or disable _plpgsql_lint_ for functions that use a dynamic
 queries.
+
+### Assign to target
+
+_plpgsql_lint_ doesn't verify a lvalue against to rvalue yet.
 
 ## Licence
 

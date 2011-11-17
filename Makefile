@@ -1,6 +1,5 @@
 # $PostgreSQL: pgsql/contrib/plpgsql_lint/Makefile,v 1.1 2008/07/29 18:31:20 tgl Exp $
 
-MODULES = plpgsql_lint
 MODULE_big = plpgsql_lint
 OBJS = plpgsql_lint.o
 

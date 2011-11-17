@@ -16,22 +16,46 @@ PG_MODULE_MAGIC;
 #endif
 
 static void lint_func_beg( PLpgSQL_execstate * estate, PLpgSQL_function * func );
-static void assign_result_desc(PLpgSQL_execstate *estate,
-				    PLpgSQL_stmt *stmt,
-					    PLpgSQL_rec *rec,
-						    PLpgSQL_expr *query,
-							    bool use_element_type);
-static bool plpgsql_lint_expr_walker(PLpgSQL_function *func,
-				PLpgSQL_stmt *stmt,
-					bool (*expr_walker)(),
-								void *context);
-static bool plpgsql_lint_expr_prepare_plan(PLpgSQL_stmt *stmt, PLpgSQL_expr *expr, void *context);
-static bool check_target(PLpgSQL_stmt *stmt, int varno,
-				bool (*expr_walker)(),
-						void *context);
-static bool check_row(PLpgSQL_stmt *stmt, int dno,
-				bool (*expr_walker)(),
-						void *context);
+
+static void exec_prepare_plan(PLpgSQL_execstate *estate,
+				  PLpgSQL_expr *expr, int cursorOptions);
+
+static void check_target(PLpgSQL_execstate *estate, PLpgSQL_stmt *stmt, int varno, TupleDesc tupdesc);
+static void check_row_or_rec(PLpgSQL_execstate *estate, PLpgSQL_stmt *stmt,
+							PLpgSQL_row *row, PLpgSQL_rec *rec,
+											TupleDesc tupdesc);
+
+static void prepare_expr(PLpgSQL_execstate *estate, PLpgSQL_stmt *stmt, PLpgSQL_expr *expr, bool *fresh_plan);
+static TupleDesc prepare_tupdesc(PLpgSQL_execstate *estate, PLpgSQL_expr *expr,
+								int target_varno,
+										bool fresh_plan,
+											bool use_element_type,
+											bool expand_record,
+											bool is_expression);
+static TupleDesc prepare_tupdesc_novar(PLpgSQL_execstate *estate, PLpgSQL_expr *expr,
+								    bool fresh_plan,
+									    bool is_expression);
+static TupleDesc prepare_tupdesc_row_or_rec(PLpgSQL_execstate *estate, PLpgSQL_expr *expr,
+										PLpgSQL_row *row,
+										PLpgSQL_rec *rec,
+											bool fresh_plan);
+
+static void assign_tupdesc_dno(PLpgSQL_execstate *estate, int varno, TupleDesc tupdesc);
+static void assign_tupdesc_row_or_rec(PLpgSQL_execstate *estate, PLpgSQL_row *row, PLpgSQL_rec *rec, TupleDesc tupdesc);
+
+static void cleanup(bool fresh_plan, PLpgSQL_expr *expr, TupleDesc tupdesc);
+
+static void lint_stmts(PLpgSQL_execstate *estate, PLpgSQL_function *func, List *stmts);
+static void lint_stmt(PLpgSQL_execstate *estate, PLpgSQL_function *func, PLpgSQL_stmt *stmt);
+
+static TupleDesc query_get_desc(PLpgSQL_execstate *estate, PLpgSQL_expr *query,
+								bool use_element_type,
+								bool expand_record,
+									bool is_expression);
+
+static void simple_check_expr(PLpgSQL_execstate *estate, PLpgSQL_stmt *stmt, PLpgSQL_expr *expr);
+
+
 
 
 #if PG_VERSION_NUM < 90000
@@ -135,8 +159,7 @@ lint_func_beg( PLpgSQL_execstate * estate, PLpgSQL_function * func )
 
 		estate->err_text = NULL;
 
-		plpgsql_lint_expr_walker(func, (PLpgSQL_stmt *) func->action,
-							    plpgsql_lint_expr_prepare_plan, (void *) estate);
+		lint_stmt(estate, func, (PLpgSQL_stmt *) func->action);
 
 		estate->err_text = err_text;
 		estate->err_stmt = NULL;
@@ -176,26 +199,22 @@ lint_func_beg( PLpgSQL_execstate * estate, PLpgSQL_function * func )
  * be next improvent, other improvent should be checking a result type of subscripts
  * expressions.
  */
-static bool
-check_target(PLpgSQL_stmt *stmt, int varno,
-			    bool (*expr_walker)(),
-						void *context)
+static void
+check_target(PLpgSQL_execstate *estate, PLpgSQL_stmt *stmt, int varno, TupleDesc tupdesc)
 {
-	PLpgSQL_execstate *estate = (PLpgSQL_execstate *) context;
 	PLpgSQL_datum *target = estate->datums[varno];
 
 	switch (target->dtype)
 	{
 		case PLPGSQL_DTYPE_VAR:
+			break;
+
 		case PLPGSQL_DTYPE_REC:
-			return false;
+			break;
 
 		case PLPGSQL_DTYPE_ROW:
 			{
-				PLpgSQL_row *row = (PLpgSQL_row *) target;
-
-				if (check_row(stmt, row->dno, expr_walker, context))
-					return true;
+				check_row_or_rec(estate, stmt, (PLpgSQL_row *) target, NULL, tupdesc);
 			}
 			break;
 
@@ -260,9 +279,8 @@ check_target(PLpgSQL_stmt *stmt, int varno,
 								 errmsg("number of array dimensions (%d) exceeds the maximum allowed (%d)",
 										nsubscripts + 1, MAXDIM)));
 
-					if (expr_walker(stmt, arrayelem->subscript, context))
-						return true;
-										
+					simple_check_expr(estate, stmt, arrayelem->subscript);
+
 					target = estate->datums[arrayelem->arrayparentno];
 				} while (target->dtype == PLPGSQL_DTYPE_ARRAYELEM);
 
@@ -276,34 +294,177 @@ check_target(PLpgSQL_stmt *stmt, int varno,
 			break;
 	}
 
-	return false;
+	return;
 }
 
 /*
  * Check composed lvalue
  */
-static bool
-check_row(PLpgSQL_stmt *stmt, int dno,
-			    bool (*expr_walker)(),
-						void *context)
+static void
+check_row_or_rec(PLpgSQL_execstate *estate, PLpgSQL_stmt *stmt,
+							PLpgSQL_row *row, PLpgSQL_rec *rec,
+											TupleDesc tupdesc)
 {
-	PLpgSQL_execstate *estate = (PLpgSQL_execstate *) context;
-	PLpgSQL_row *row;
 	int fnum;
 
-	row = (PLpgSQL_row *) (estate->datums[dno]);
-
-	for (fnum = 0; fnum < row->nfields; fnum++)
+	/* there are nothing to check on rec now */
+	if (row != NULL)
 	{
-		if (row->varnos[fnum] < 0)
-			continue;
+		for (fnum = 0; fnum < row->nfields; fnum++)
+		{
+			if (row->varnos[fnum] < 0)
+				continue;
 	
-		if (check_target(stmt, row->varnos[fnum],
-						expr_walker, context))
-			return true;
+			check_target(estate, stmt, row->varnos[fnum], tupdesc);
+		}
+	}
+}
+
+/*
+ * Prepare expression's plan. When there are plan generated by plpgsql interpret
+ * then set flag fresh_plan to false and returns.
+ */
+static void
+prepare_expr(PLpgSQL_execstate *estate, PLpgSQL_stmt *stmt, PLpgSQL_expr *expr, bool *fresh_plan)
+{
+	int cursorOptions = 0;
+
+	Assert(stmt != NULL && expr != NULL);
+
+	if (expr->plan != NULL)
+	{
+		*fresh_plan = false;
+		return;
 	}
 
-	return false;
+	switch (stmt->cmd_type)
+	{
+		case PLPGSQL_STMT_OPEN:
+			{
+				PLpgSQL_stmt_open *stmt_open = (PLpgSQL_stmt_open *) stmt;
+				PLpgSQL_var *curvar = (PLpgSQL_var *) estate->datums[stmt_open->curvar];
+
+				cursorOptions = curvar->cursor_options;
+			}
+			break;
+
+		case PLPGSQL_STMT_FORC:
+			{
+				PLpgSQL_stmt_forc *stmt_forc = (PLpgSQL_stmt_forc *) stmt;
+				PLpgSQL_var *curvar = (PLpgSQL_var *) estate->datums[stmt_forc->curvar];
+
+				/*
+				 * change a cursorOption only when this call is related to
+				 * curvar->cursor_explicit_expr
+				 */
+				if (curvar->cursor_explicit_expr == expr)
+					cursorOptions = curvar->cursor_options;
+			}
+			break;
+	}
+
+	exec_prepare_plan(estate, expr, cursorOptions);
+
+	*fresh_plan = true;
+
+}
+
+/*
+ * Prepare tuple descriptor based on expression result. This process has a some overhed, so it
+ * returns NULL, when descriptor is not necessary.
+ */
+static TupleDesc
+prepare_tupdesc(PLpgSQL_execstate *estate, PLpgSQL_expr *expr,
+								int target_varno,
+										bool fresh_plan,
+											bool use_element_type,
+											bool expand_record,
+											bool is_expression)
+{
+	PLpgSQL_datum *target = estate->datums[target_varno];
+	TupleDesc tupdesc = NULL;
+    
+	/*
+	 * do tupdesc when:
+	 *       target_varno is DTYPE_REC
+	 *       is fresh_plan and is expression
+	 */
+	if ((fresh_plan && is_expression) || target->dtype == PLPGSQL_DTYPE_REC)
+	{
+		tupdesc = query_get_desc(estate, expr, use_element_type, expand_record, is_expression);
+	}
+
+	return tupdesc;
+}
+
+/*
+ * Prepare tuple desc when target is record or plan is fresh
+ */
+static TupleDesc
+prepare_tupdesc_row_or_rec(PLpgSQL_execstate *estate, PLpgSQL_expr *expr,
+									PLpgSQL_row *row,
+									PLpgSQL_rec *rec,
+										bool fresh_plan)
+{
+	TupleDesc tupdesc = NULL;
+
+	/*
+	 * do tupdesc when:
+	 *       target_varno is DTYPE_REC
+	 *       is fresh_plan and is expression
+	 */
+	if (fresh_plan && rec != NULL)
+	{
+		tupdesc = query_get_desc(estate, expr, false, false, false);
+	}
+
+	return tupdesc;
+}
+
+
+/*
+ * same as above, but not used for assign tupledesc to record var
+ */
+static TupleDesc
+prepare_tupdesc_novar(PLpgSQL_execstate *estate, PLpgSQL_expr *expr,
+								    bool fresh_plan,
+									    bool is_expression)
+{
+	TupleDesc tupdesc = NULL;
+
+	if (fresh_plan && is_expression)
+	{
+		tupdesc = query_get_desc(estate, expr, false, false, is_expression);
+
+		if (is_expression)
+			if (tupdesc->natts != 1)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						  errmsg_plural("query \"%s\" returned %d column",
+								   "query \"%s\" returned %d columns",
+								   tupdesc->natts,
+								   expr->query,
+								   tupdesc->natts)));
+	}
+
+	return tupdesc;
+}
+
+/*
+ * Check of simple expression. Checked expression is not used as source for any target
+ */
+static void
+simple_check_expr(PLpgSQL_execstate *estate, PLpgSQL_stmt *stmt, PLpgSQL_expr *expr)
+{
+	bool fresh_plan;
+	TupleDesc	tupdesc;
+
+	if (expr != NULL)
+	{
+		prepare_expr(estate, stmt, expr, &fresh_plan);
+		tupdesc = prepare_tupdesc_novar(estate, expr, fresh_plan, true);
+		cleanup(fresh_plan, expr, tupdesc);
+	}
 }
 
 #if PG_VERSION_NUM < 90000
@@ -479,13 +640,13 @@ exec_prepare_plan(PLpgSQL_execstate *estate,
 }
 
 /*
- * call a plpgsql_lint_expr_walker for any statement in list
+ * call a lint_stmt for any statement in list
  *
  */
-static bool
-plpgsql_lint_expr_walker_list(PLpgSQL_function *func, List *stmts,
-					bool (*expr_walker)(),
-								void *context)
+static void
+lint_stmts(PLpgSQL_execstate *estate,
+					PLpgSQL_function *func,
+					List *stmts)
 {
 	ListCell *lc;
 
@@ -493,28 +654,27 @@ plpgsql_lint_expr_walker_list(PLpgSQL_function *func, List *stmts,
 	{
 		PLpgSQL_stmt *stmt = (PLpgSQL_stmt *) lfirst(lc);
 
-		if (plpgsql_lint_expr_walker(func, stmt, expr_walker, context))
-			return true;
+		lint_stmt(estate, func, stmt);
 	}
-	return false;
 }
 
 /*
- * walk over all expressions inside statements tree
- *
- * stmt_walker is function called for every stmt and should be NULL
+ * walk over all statements tree
  *
  */
-static bool
-plpgsql_lint_expr_walker(PLpgSQL_function *func,
-				PLpgSQL_stmt *stmt,
-					bool (*expr_walker)(),
-								void *context)
+static void
+lint_stmt(PLpgSQL_execstate *estate,
+					PLpgSQL_function *func,
+					PLpgSQL_stmt *stmt)
 {
+	bool		   fresh_plan;
+	TupleDesc	   tupdesc = NULL;
 	ListCell *l;
 
 	if (stmt == NULL)
-		return false;
+		return;
+
+	estate->err_stmt = stmt;
 
 	switch ((enum PLpgSQL_stmt_types) stmt->cmd_type)
 	{
@@ -528,219 +688,229 @@ plpgsql_lint_expr_walker(PLpgSQL_function *func,
 				{
 					d = func->datums[stmt_block->initvarnos[i]];
 
-					switch(d->dtype)
+					if (d->dtype == PLPGSQL_DTYPE_VAR)
 					{
-						case PLPGSQL_DTYPE_VAR:
-							{
-								PLpgSQL_var *var = (PLpgSQL_var *) d;
+						PLpgSQL_var *var = (PLpgSQL_var *) d;
 
-								if (expr_walker(stmt, var->default_val, context))
-									return true;
-
-								/*
-								 * theoretically there is place for walk over var->cursor_explicit_expr,
-								 * but we would not to call process too early. In this moment a some 
-								 * record parameters should be unknown. So we will wait on better moment
-								 *
-								 * if (expr_walker(stmt, var->cursor_explicit_expr, context))
-								 * 	return true;
-								 */
-							}
-							break;
-						case PLPGSQL_DTYPE_ROW:
-						case PLPGSQL_DTYPE_REC:
-						case PLPGSQL_DTYPE_RECFIELD:
-							break;
-						case PLPGSQL_DTYPE_ARRAYELEM:
-							if (expr_walker(stmt, ((PLpgSQL_arrayelem *) d)->subscript, context))
-								return true;
-						default:
-							elog(ERROR, "unrecognized data type: %d", d->dtype);
+						simple_check_expr(estate, stmt, var->default_val);
 					}
 				}
 
-				if (plpgsql_lint_expr_walker_list(func, stmt_block->body, expr_walker, context))
-					return true;
-
+				lint_stmts(estate, func, stmt_block->body);
+				
 				if (stmt_block->exceptions)
 				{
 					foreach(l, stmt_block->exceptions->exc_list)
 					{
-						if (plpgsql_lint_expr_walker_list(func, ((PLpgSQL_exception *) lfirst(l))->action,
-														expr_walker,
-															    context))
-							return true;
+						lint_stmts(estate, func, ((PLpgSQL_exception *) lfirst(l))->action);
 					}
 				}
-
-				return false;
 			}
+			break;
 
 		case PLPGSQL_STMT_ASSIGN:
 			{
 				PLpgSQL_stmt_assign *stmt_assign = (PLpgSQL_stmt_assign *) stmt;
 
-				/*
-				 * don't repeat a check target, validate it,
-				 * only when there are no cached plan - first call
-				 */
-				if (stmt_assign->expr->plan == NULL)
-				{
-					if (check_target(stmt, stmt_assign->varno, expr_walker, context))
-						return true;
-				}
+				/* prepare plan if desn't exist yet */
+				prepare_expr(estate, stmt, stmt_assign->expr, &fresh_plan);
 
-				return expr_walker(stmt, stmt_assign->expr, context);
+				/*
+				 * Tuple descriptor is necessary when we would to check expression
+				 * first time or when target is record.
+				 */
+				tupdesc = prepare_tupdesc(estate, stmt_assign->expr, stmt_assign->varno,
+											fresh_plan,
+												false,		/* no element type */
+												true,		/* expand record */
+												true);		/* is expression */
+
+				/* check target, ensure target can get a result */
+				check_target(estate, stmt, stmt_assign->varno, tupdesc);
+
+				/* assign a tupdesc to record variable */
+				assign_tupdesc_dno(estate, stmt_assign->varno, tupdesc);
+
+				/* cleanup fresh plan and tuple descriptor */
+				cleanup(fresh_plan, stmt_assign->expr, tupdesc);
 			}
+			break;
 
 		case PLPGSQL_STMT_IF:
 			{
 				PLpgSQL_stmt_if *stmt_if = (PLpgSQL_stmt_if *) stmt;
 
 #if PG_VERSION_NUM >= 90200
+
 				ListCell *l;
+
 #endif
 
-				if (expr_walker(stmt, stmt_if->cond, context))
-					return true;
+				simple_check_expr(estate, stmt, stmt_if->cond);
 
 #if PG_VERSION_NUM >= 90200
 
-				if (plpgsql_lint_expr_walker_list(func, stmt_if->then_body, expr_walker, context))
-						return true;
-
+				lint_stmts(estate, func, stmt_if->then_body);
 
 				foreach(l, stmt_if->elsif_list)
 				{
 					PLpgSQL_if_elsif *elif = (PLpgSQL_if_elsif *) lfirst(l);
 
-					if (expr_walker(stmt, elif->cond, context))
-						return true;
-
-					if (plpgsql_lint_expr_walker_list(func, elif->stmts, expr_walker, context))
-						return true;
-
+					simple_check_expr(estate, stmt, elif->cond);
+					lint_stmts(estate, func, elif->stmts);
 				}
 
-				return plpgsql_lint_expr_walker_list(func, stmt_if->else_body, expr_walker, context);
+				lint_stmts(estate, func, stmt_if->else_body);
 
 #else
-				if (plpgsql_lint_expr_walker_list(func, stmt_if->true_body, expr_walker, context))
-					return true;
 
-				return plpgsql_lint_expr_walker_list(func, stmt_if->false_body, expr_walker, context);
+				lint_stmts(estate, func, stmt_if->true_body);
+				lint_stmts(estate, func, stmt_if->false_body);
 
 #endif
 
 			}
+			break;
 
 		case PLPGSQL_STMT_CASE:
 			{
 				PLpgSQL_stmt_case *stmt_case = (PLpgSQL_stmt_case *) stmt;
+				Oid result_oid;
 
-				if (expr_walker(stmt, stmt_case->t_expr, context))
-					return true;
+				if (stmt_case->t_expr != NULL)
+				{
+					PLpgSQL_var *t_var = (PLpgSQL_var *) estate->datums[stmt_case->t_varno];
+
+					prepare_expr(estate, stmt, stmt_case->t_expr, &fresh_plan);
+
+					/* we need tupdesc everytime */
+					tupdesc = prepare_tupdesc_novar(estate, stmt_case->t_expr, true, true);
+					result_oid = tupdesc->attrs[0]->atttypid;
+
+					/*
+					 * When expected datatype is different from real, change it. Note that
+					 * what we're modifying here is an execution copy of the datum, so
+					 * this doesn't affect the originally stored function parse tree.
+					 */
+
+					if (t_var->datatype->typoid != result_oid)
+
+#if PG_VERSION_NUM >= 90100
+
+						t_var->datatype = plpgsql_build_datatype(result_oid,
+														 -1,
+													   estate->func->fn_input_collation);
+#else
+
+						t_var->datatype = plpgsql_build_datatype(result_oid, -1);
+
+#endif
+
+					cleanup(fresh_plan, stmt_case->t_expr,tupdesc);
+				}
 
 				foreach(l, stmt_case->case_when_list)
 				{
 					PLpgSQL_case_when *cwt = (PLpgSQL_case_when *) lfirst(l);
 
-					if (expr_walker(stmt, cwt->expr, context))
-						return true;
-
-					if (plpgsql_lint_expr_walker_list(func, cwt->stmts, expr_walker, context))
-						return true;
+					simple_check_expr(estate, stmt, cwt->expr);
+					lint_stmts(estate, func, cwt->stmts);
 				}
 
-				return plpgsql_lint_expr_walker_list(func, stmt_case->else_stmts, expr_walker, context);
+				lint_stmts(estate, func, stmt_case->else_stmts);
+
 			}
+			break;
 
 		case PLPGSQL_STMT_LOOP:
-			return plpgsql_lint_expr_walker_list(func, ((PLpgSQL_stmt_loop *) stmt)->body, expr_walker, context);
+			lint_stmts(estate, func, ((PLpgSQL_stmt_loop *) stmt)->body);
+			break;
 
 		case PLPGSQL_STMT_WHILE:
 			{
 				PLpgSQL_stmt_while *stmt_while = (PLpgSQL_stmt_while *) stmt;
 
-				if (expr_walker(stmt, stmt_while->cond, context))
-					return true;
-
-				return plpgsql_lint_expr_walker_list(func, stmt_while->body, expr_walker, context);
+				simple_check_expr(estate, stmt, stmt_while->cond);
+				lint_stmts(estate, func, stmt_while->body);
 			}
+			break;
 
 		case PLPGSQL_STMT_FORI:
 			{
 				PLpgSQL_stmt_fori *stmt_fori = (PLpgSQL_stmt_fori *) stmt;
 
-				if (expr_walker(stmt, stmt_fori->lower, context))
-					return true;
+				simple_check_expr(estate, stmt, stmt_fori->lower);
+				simple_check_expr(estate, stmt, stmt_fori->upper);
+				simple_check_expr(estate, stmt, stmt_fori->step);
 
-				if (expr_walker(stmt, stmt_fori->upper, context))
-					return true;
-
-				if (expr_walker(stmt, stmt_fori->step, context))
-					return true;
-
-				return plpgsql_lint_expr_walker_list(func, stmt_fori->body, expr_walker, context);
+				lint_stmts(estate, func, stmt_fori->body);
 			}
+			break;
 
 		case PLPGSQL_STMT_FORS:
 			{
 				PLpgSQL_stmt_fors *stmt_fors = (PLpgSQL_stmt_fors *) stmt;
 
-				if (expr_walker(stmt, stmt_fors->query, context))
-					return true;
+				prepare_expr(estate, stmt, stmt_fors->query, &fresh_plan);
+				tupdesc = prepare_tupdesc_row_or_rec(estate,
+									stmt_fors->query,
+											stmt_fors->row,
+											stmt_fors->rec,
+												fresh_plan);
+				check_row_or_rec(estate, stmt,
+							stmt_fors->row, stmt_fors->rec,
+											    tupdesc);
+				assign_tupdesc_row_or_rec(estate, stmt_fors->row, stmt_fors->rec, tupdesc);
 
-				if (stmt_fors->query->plan == NULL && stmt_fors->row != NULL)
-				{
-					if (check_row(stmt, stmt_fors->row->dno, expr_walker, context))
-						return true;
-				}
+				lint_stmts(estate, func, stmt_fors->body);
 
-				return plpgsql_lint_expr_walker_list(func, stmt_fors->body, expr_walker, context);
+				cleanup(fresh_plan, stmt_fors->query, tupdesc);
 			}
+			break;
 
 		case PLPGSQL_STMT_FORC:
 			{
 				PLpgSQL_stmt_forc *stmt_forc = (PLpgSQL_stmt_forc *) stmt;
 				PLpgSQL_var *var = (PLpgSQL_var *) func->datums[stmt_forc->curvar];
 
-				if (expr_walker(stmt, stmt_forc->argquery, context))
-					return true;
+				simple_check_expr(estate, stmt, stmt_forc->argquery);
 
-				if (expr_walker(stmt, var->cursor_explicit_expr, context))
-					return true;
-
-				if (var->cursor_explicit_expr->plan == NULL && stmt_forc->row != NULL)
+				if (var->cursor_explicit_expr != NULL)
 				{
-					if (check_row(stmt, stmt_forc->row->dno, expr_walker, context))
-						return true;
+					prepare_expr(estate, stmt, var->cursor_explicit_expr, &fresh_plan);
+					tupdesc = prepare_tupdesc_row_or_rec(estate,
+										var->cursor_explicit_expr,
+												stmt_forc->row,
+												stmt_forc->rec,
+													fresh_plan);
+					check_row_or_rec(estate, stmt,
+								stmt_forc->row, stmt_forc->rec,
+												    tupdesc);
+					assign_tupdesc_row_or_rec(estate, stmt_forc->row, stmt_forc->rec, tupdesc);
 				}
 
-				return plpgsql_lint_expr_walker_list(func, stmt_forc->body, expr_walker, context);
+				lint_stmts(estate, func, stmt_forc->body);
+				cleanup(fresh_plan, var->cursor_explicit_expr, tupdesc);
 			}
+			break;
 
 		case PLPGSQL_STMT_DYNFORS:
 			{
 				PLpgSQL_stmt_dynfors * stmt_dynfors = (PLpgSQL_stmt_dynfors *) stmt;
 
-				if (expr_walker(stmt, stmt_dynfors->query, context))
-					return true;
+				if (stmt_dynfors->rec != NULL)
+					elog(ERROR, "cannot determinate a result of dynamic SQL");
+
+				simple_check_expr(estate, stmt, stmt_dynfors->query);
 
 				foreach(l, stmt_dynfors->params)
 				{
-					if (expr_walker(stmt, (PLpgSQL_expr *) lfirst(l), context))
-						return true;
+					simple_check_expr(estate, stmt, (PLpgSQL_expr *) lfirst(l));
 				}
 
-				if (stmt_dynfors->query->plan == NULL && stmt_dynfors->row != NULL)
-				{
-					if (check_row(stmt, stmt_dynfors->row->dno, expr_walker, context))
-						return true;
-				}
-
-				return plpgsql_lint_expr_walker_list(func, stmt_dynfors->body, expr_walker, context);
+				lint_stmts(estate, func, stmt_dynfors->body);
 			}
+			break;
 
 #if PG_VERSION_NUM >= 90100
 
@@ -748,61 +918,99 @@ plpgsql_lint_expr_walker(PLpgSQL_function *func,
 			{
 				PLpgSQL_stmt_foreach_a *stmt_foreach_a = (PLpgSQL_stmt_foreach_a *) stmt;
 
-				if (expr_walker(stmt, stmt_foreach_a->expr, context))
-					return true;
+				prepare_expr(estate, stmt, stmt_foreach_a->expr, &fresh_plan);
+				tupdesc = prepare_tupdesc(estate, stmt_foreach_a->expr, stmt_foreach_a->varno,
+											fresh_plan,
+												true,		/* element type */
+												false,		/* expand record */
+												true);		/* is expression */
 
-				return plpgsql_lint_expr_walker_list(func, stmt_foreach_a->body, expr_walker, context);
+				check_target(estate, stmt, stmt_foreach_a->varno, tupdesc);
+				assign_tupdesc_dno(estate, stmt_foreach_a->varno, tupdesc);
+				cleanup(fresh_plan, stmt_foreach_a->expr, tupdesc);
+
+				lint_stmts(estate, func, stmt_foreach_a->body);
 			}
+			break;
 
 #endif
 
 		case PLPGSQL_STMT_EXIT:
-			return expr_walker(stmt, ((PLpgSQL_stmt_exit *) stmt)->cond, context);
+			simple_check_expr(estate, stmt, ((PLpgSQL_stmt_exit *) stmt)->cond);
+			break;
 
 		case PLPGSQL_STMT_PERFORM:
-			return expr_walker(stmt, ((PLpgSQL_stmt_perform *) stmt)->expr, context);
+			simple_check_expr(estate, stmt, ((PLpgSQL_stmt_perform *) stmt)->expr);
+			break;
 
 		case PLPGSQL_STMT_RETURN:
-			return expr_walker(stmt, ((PLpgSQL_stmt_return *) stmt)->expr, context);
+			simple_check_expr(estate, stmt, ((PLpgSQL_stmt_return *) stmt)->expr);
+			break;
 
 		case PLPGSQL_STMT_RETURN_NEXT:
-			return expr_walker(stmt, ((PLpgSQL_stmt_return_next *) stmt)->expr, context);
+			simple_check_expr(estate, stmt, ((PLpgSQL_stmt_return_next *) stmt)->expr);
+			break;
 
 		case PLPGSQL_STMT_RETURN_QUERY:
 			{
 				PLpgSQL_stmt_return_query *stmt_rq = (PLpgSQL_stmt_return_query *) stmt;
 
-				if (expr_walker(stmt, stmt_rq->query, context))
-					return true;
-
-				if (expr_walker(stmt, stmt_rq->dynquery, context))
-					return true;
+				simple_check_expr(estate, stmt, stmt_rq->query);
+				simple_check_expr(estate, stmt, stmt_rq->dynquery);
 
 				foreach(l, stmt_rq->params)
 				{
-					if (expr_walker(stmt, (PLpgSQL_expr *) lfirst(l), context))
-						return true;
+					simple_check_expr(estate, stmt, (PLpgSQL_expr *) lfirst(l));
 				}
-
-				return false;
 			}
+			break;
 
 		case PLPGSQL_STMT_RAISE:
 			{
 				PLpgSQL_stmt_raise *stmt_raise = (PLpgSQL_stmt_raise *) stmt;
+				ListCell *current_param;
+				char *cp;
 
 				foreach(l, stmt_raise->params)
 				{
-					if (expr_walker(stmt, (PLpgSQL_expr *) lfirst(l), context))
-						return true;
-				}
-				foreach(l, stmt_raise->options)
-				{
-					if (expr_walker(stmt, ((PLpgSQL_raise_option *) lfirst(l))->expr, context))
-						return true;
+					simple_check_expr(estate, stmt, (PLpgSQL_expr *) lfirst(l));
 				}
 
-				return expr_walker(stmt, NULL, context);
+				foreach(l, stmt_raise->options)
+				{
+					simple_check_expr(estate, stmt, (PLpgSQL_expr *) lfirst(l));
+				}
+
+				current_param = list_head(stmt_raise->params);
+
+				/* we can skip this test, when we identify a second loop */
+				if (!(current_param != NULL && (((PLpgSQL_expr *) lfirst(current_param))->plan != NULL)))
+				{
+					/* ensure any single % has a own parameter */
+					for (cp = stmt_raise->message; *cp; cp++)
+					{
+						if (cp[0] == '%')
+						{
+							if (cp[1] == '%')
+							{
+								cp++;
+								continue;
+							}
+						}
+
+						if (current_param == NULL)
+							ereport(ERROR,
+									(errcode(ERRCODE_SYNTAX_ERROR),
+								errmsg("too few parameters specified for RAISE")));
+
+						current_param = lnext(current_param);
+					}
+
+					if (current_param != NULL)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("too many parameters specified for RAISE")));
+				}
 			}
 			break;
 
@@ -810,17 +1018,20 @@ plpgsql_lint_expr_walker(PLpgSQL_function *func,
 			{
 				PLpgSQL_stmt_execsql *stmt_execsql = (PLpgSQL_stmt_execsql *) stmt;
 
-				if (expr_walker(stmt, stmt_execsql->sqlstmt, context))
-					return true;
+				prepare_expr(estate, stmt, stmt_execsql->sqlstmt, &fresh_plan);
+				if (stmt_execsql->into)
+					tupdesc = prepare_tupdesc_row_or_rec(estate,
+										stmt_execsql->sqlstmt,
+											stmt_execsql->row,
+											stmt_execsql->rec,
+												fresh_plan);
 
-				if (stmt_execsql->sqlstmt->plan == NULL && stmt_execsql->into 
-									    && stmt_execsql->row != NULL)
-				{
-					if (check_row(stmt, stmt_execsql->row->dno, expr_walker, context))
-						return true;
-				}
-
-				return false;
+				/* check target, ensure target can get a result */
+				check_row_or_rec(estate, stmt,
+							stmt_execsql->row, stmt_execsql->rec,
+											    tupdesc);
+				assign_tupdesc_row_or_rec(estate, stmt_execsql->row, stmt_execsql->rec, tupdesc);
+				cleanup(fresh_plan, stmt_execsql->sqlstmt, tupdesc);
 			}
 			break;
 
@@ -828,123 +1039,101 @@ plpgsql_lint_expr_walker(PLpgSQL_function *func,
 			{
 				PLpgSQL_stmt_dynexecute *stmt_dynexecute = (PLpgSQL_stmt_dynexecute *) stmt;
 
-				if (expr_walker(stmt, stmt_dynexecute->query, context))
-					return true;
+				simple_check_expr(estate, stmt, stmt_dynexecute->query);
 
 				foreach(l, stmt_dynexecute->params)
 				{
-					if (expr_walker(stmt, (PLpgSQL_expr *) lfirst(l), context))
-						return true;
+					simple_check_expr(estate, stmt, (PLpgSQL_expr *) lfirst(l));
 				}
 
-				if (stmt_dynexecute->query->plan == NULL && stmt_dynexecute->into
-									    && stmt_dynexecute->row != NULL)
+				if (stmt_dynexecute->into)
 				{
-					if (check_row(stmt, stmt_dynexecute->row->dno, expr_walker, context))
-						return true;
+					if (stmt_dynexecute->rec != NULL)
+						elog(ERROR, "cannot determinate a result of dynamic SQL");
+
+					check_row_or_rec(estate, stmt, stmt_dynexecute->row, stmt_dynexecute->rec, NULL);
 				}
-
-				return false;
-			}
-			break;
-
-		case PLPGSQL_STMT_GETDIAG:
-			{
-				ListCell *lc;
-				PLpgSQL_stmt_getdiag *stmt_getdiag = (PLpgSQL_stmt_getdiag *) stmt;
-
-				foreach(lc, stmt_getdiag->diag_items)
-				{
-					PLpgSQL_diag_item *diag_item = (PLpgSQL_diag_item *) lfirst(lc);
-
-					if (check_target(stmt, diag_item->target, expr_walker, context))
-						return true;
-				}
-
-				return false;
 			}
 			break;
 
 		case PLPGSQL_STMT_OPEN:
 			{
 				PLpgSQL_stmt_open *stmt_open = (PLpgSQL_stmt_open *) stmt;
-
 				PLpgSQL_var *var = (PLpgSQL_var *) func->datums[stmt_open->curvar];
 
-				if (expr_walker(stmt, var->cursor_explicit_expr, context))
-					return true;
-
-				if (expr_walker(stmt, stmt_open->query, context))
-					return true;
-
-				if (expr_walker(stmt, stmt_open->dynquery, context))
-					return true;
-
-				if (expr_walker(stmt, stmt_open->argquery, context))
-					return true;
+				simple_check_expr(estate, stmt, var->cursor_explicit_expr);
+				simple_check_expr(estate, stmt, stmt_open->query);
+				simple_check_expr(estate, stmt, stmt_open->dynquery);
+				simple_check_expr(estate, stmt, stmt_open->argquery);
 
 #if PG_VERSION_NUM >= 90000
 
 				foreach(l, stmt_open->params)
 				{
-					if (expr_walker(stmt, (PLpgSQL_expr *) lfirst(l), context))
-						return true;
+					simple_check_expr(estate, stmt, (PLpgSQL_expr *) lfirst(l));
 				}
 
-				return false;
-
 #endif
-
 			}
+			break;
+
+		case PLPGSQL_STMT_GETDIAG:
+			{
+				PLpgSQL_stmt_getdiag *stmt_getdiag = (PLpgSQL_stmt_getdiag *) stmt;
+				ListCell *lc;
+
+				foreach(lc, stmt_getdiag->diag_items)
+				{
+					PLpgSQL_diag_item *diag_item = (PLpgSQL_diag_item *) lfirst(lc);
+
+					check_target(estate, stmt, diag_item->target, NULL);
+				}
+			}
+			break;
 
 		case PLPGSQL_STMT_FETCH:
 			{
 				PLpgSQL_stmt_fetch *stmt_fetch = (PLpgSQL_stmt_fetch *) stmt;
+				PLpgSQL_var *curvar = (PLpgSQL_var *)(estate->datums[stmt_fetch->curvar]);
 
-				if (!stmt_fetch && stmt_fetch->row != NULL)
+				if (curvar != NULL && curvar->cursor_explicit_expr != NULL)
 				{
-					if (check_row(stmt, stmt_fetch->row->dno, expr_walker, context))
-						return true;
+					prepare_expr(estate, stmt, curvar->cursor_explicit_expr, &fresh_plan);
+					tupdesc = prepare_tupdesc_row_or_rec(estate,
+										curvar->cursor_explicit_expr,
+												stmt_fetch->row,
+												stmt_fetch->rec,
+													fresh_plan);
+					check_row_or_rec(estate, stmt,
+								stmt_fetch->row, stmt_fetch->rec,
+												    tupdesc);
+					assign_tupdesc_row_or_rec(estate, stmt_fetch->row, stmt_fetch->rec, tupdesc);
+					cleanup(fresh_plan, curvar->cursor_explicit_expr, tupdesc);
 				}
-
-				return expr_walker(stmt, NULL, context);
 			}
 			break;
 
 		case PLPGSQL_STMT_CLOSE:
-			return false;
+			break;
 
 		default:
 			elog(ERROR, "unrecognized cmd_type: %d", stmt->cmd_type);
-			return false; /* be compiler quite */
+			return; /* be compiler quite */
 	}
 }
 
 /*
- * Sometime we must initialize a unknown record variable with NULL
- * of type that is derived from some plan. This is necessary for later
- * using a rec variable. Last parameter 'use_element_type' is true, when
- * we would to assign a element type of result array.
- *
+ * Returns a tuple descriptor of planned query
  */
-static void
-assign_result_desc(PLpgSQL_execstate *estate,
-				    PLpgSQL_stmt *stmt,
-					    PLpgSQL_rec *rec,
-						    PLpgSQL_expr *query,
-							    bool use_element_type)
+static TupleDesc 
+query_get_desc(PLpgSQL_execstate *estate,
+						PLpgSQL_expr *query,
+							bool use_element_type,
+							bool expand_record,
+								bool is_expression)
 {
-	bool	   *nulls;
-	HeapTuple  tup;
+	TupleDesc tupdesc = NULL;
 	CachedPlanSource *plansource = NULL;
-
-	estate->err_stmt = stmt;
-
-	if (rec->freetup)
-		heap_freetuple(rec->tup);
-
-	if (rec->freetupdesc)
-		FreeTupleDesc(rec->tupdesc);
 
 	if (query->plan != NULL)
 	{
@@ -958,73 +1147,77 @@ assign_result_desc(PLpgSQL_execstate *estate,
 
 		plansource = (CachedPlanSource *) linitial(plan->plancache_list);
 
-		rec->tupdesc = CreateTupleDescCopy(plansource->resultDesc);
-		rec->freetupdesc = true;
+		tupdesc = CreateTupleDescCopy(plansource->resultDesc);
 	}
 	else
 		elog(ERROR, "there are no plan for query: \"%s\"",
 							    query->query);
+
 	/*
 	 * try to get a element type, when result is a array (used with FOREACH ARRAY stmt)
 	 */
 	if (use_element_type)
 	{
 		Oid elemtype;
-		TupleDesc tupdesc;
+		TupleDesc elemtupdesc;
 
 		/* result should be a array */
-		if (rec->tupdesc->natts != 1)
+		if (tupdesc->natts != 1)
 			ereport(ERROR,
 				(errcode(ERRCODE_SYNTAX_ERROR),
 				 errmsg_plural("query \"%s\" returned %d column",
 							   "query \"%s\" returned %d columns",
-							   rec->tupdesc->natts,
+							   tupdesc->natts,
 							   query->query,
-							   rec->tupdesc->natts)));
+							   tupdesc->natts)));
 
 		/* check the type of the expression - must be an array */
-		elemtype = get_element_type(rec->tupdesc->attrs[0]->atttypid);
+		elemtype = get_element_type(tupdesc->attrs[0]->atttypid);
 		if (!OidIsValid(elemtype))
 			ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
 				 errmsg("FOREACH expression must yield an array, not type %s",
-						format_type_be(rec->tupdesc->attrs[0]->atttypid))));
+						format_type_be(tupdesc->attrs[0]->atttypid))));
 
 		/* we can't know typmod now */
-		tupdesc = lookup_rowtype_tupdesc_noerror(elemtype, -1, true);
-		if (tupdesc != NULL)
+		elemtupdesc = lookup_rowtype_tupdesc_noerror(elemtype, -1, true);
+		if (elemtupdesc != NULL)
 		{
-			if (rec->freetupdesc)
-				FreeTupleDesc(rec->tupdesc);
-			rec->tupdesc = CreateTupleDescCopy(tupdesc);
-			rec->freetupdesc = true;
-			ReleaseTupleDesc(tupdesc);
+			FreeTupleDesc(tupdesc);
+			tupdesc = CreateTupleDescCopy(elemtupdesc);
+			ReleaseTupleDesc(elemtupdesc);
 		}
 		else
 			elog(ERROR, "cannot to identify real type for record type variable");
 	}
 
+	if (is_expression && tupdesc->natts != 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+			  errmsg_plural("query \"%s\" returned %d column",
+				   "query \"%s\" returned %d columns",
+				   tupdesc->natts,
+				   query->query,
+				   tupdesc->natts)));
+
 	/*
 	 * One spacial case is when record is assigned to composite type, then 
 	 * we should to unpack composite type.
 	 */
-	if (rec->tupdesc->tdtypeid == RECORDOID &&
-			rec->tupdesc->tdtypmod == -1 &&
-			rec->tupdesc->natts == 1 &&
-			stmt->cmd_type == PLPGSQL_STMT_ASSIGN)
+	if (tupdesc->tdtypeid == RECORDOID &&
+			tupdesc->tdtypmod == -1 &&
+			tupdesc->natts == 1 && expand_record)
 	{
-		TupleDesc tupdesc;
+		TupleDesc unpack_tupdesc;
 
-		tupdesc = lookup_rowtype_tupdesc_noerror(rec->tupdesc->attrs[0]->atttypid,
-								rec->tupdesc->attrs[0]->atttypmod,
+		unpack_tupdesc = lookup_rowtype_tupdesc_noerror(tupdesc->attrs[0]->atttypid,
+								tupdesc->attrs[0]->atttypmod,
 												    true);
-		if (tupdesc != NULL)
+		if (unpack_tupdesc != NULL)
 		{
-			if (rec->freetupdesc)
-				FreeTupleDesc(rec->tupdesc);
-			rec->tupdesc = CreateTupleDescCopy(tupdesc);
-			rec->freetupdesc = true;
-			ReleaseTupleDesc(tupdesc);
+			FreeTupleDesc(tupdesc);
+			tupdesc = CreateTupleDescCopy(unpack_tupdesc);
+			ReleaseTupleDesc(unpack_tupdesc);
 		}
 	}
 
@@ -1037,11 +1230,11 @@ assign_result_desc(PLpgSQL_execstate *estate,
 	 * This is support for assign statement
 	 *     recvar := func_with_out_parameters(..)
 	 */
-	if (rec->tupdesc->tdtypeid == RECORDOID &&
-			rec->tupdesc->tdtypmod == -1 &&
-			rec->tupdesc->natts == 1 &&
-			rec->tupdesc->attrs[0]->atttypid == RECORDOID &&
-			rec->tupdesc->attrs[0]->atttypmod == -1)
+	if (tupdesc->tdtypeid == RECORDOID &&
+			tupdesc->tdtypmod == -1 &&
+			tupdesc->natts == 1 &&
+			tupdesc->attrs[0]->atttypid == RECORDOID &&
+			tupdesc->attrs[0]->atttypmod == -1)
 	{
 		PlannedStmt *_stmt;
 		Plan		*_plan;
@@ -1089,10 +1282,10 @@ assign_result_desc(PLpgSQL_execstate *estate,
 					if (rd == NULL)
 						elog(ERROR, "function does not return composite type is not possible to identify composite type");
 
-					FreeTupleDesc(rec->tupdesc);
+					FreeTupleDesc(tupdesc);
 					BlessTupleDesc(rd);
 
-					rec->tupdesc = rd;
+					tupdesc = rd;
 				}
 			}
 		}
@@ -1105,342 +1298,80 @@ assign_result_desc(PLpgSQL_execstate *estate,
 	}
 
 	/* last recheck */
-	if (rec->tupdesc->tdtypeid == RECORDOID &&
-			rec->tupdesc->tdtypmod == -1 &&
-			rec->tupdesc->natts == 1 &&
-			rec->tupdesc->attrs[0]->atttypid == RECORDOID &&
-			rec->tupdesc->attrs[0]->atttypmod == -1)
+	if (tupdesc->tdtypeid == RECORDOID &&
+			tupdesc->tdtypmod == -1 &&
+			tupdesc->natts == 1 &&
+			tupdesc->attrs[0]->atttypid == RECORDOID &&
+			tupdesc->attrs[0]->atttypmod == -1)
 		elog(ERROR, "cannot to identify real type for record type variable");
 
-	/* initialize rec by NULLs */
-	nulls = (bool *) palloc(rec->tupdesc->natts * sizeof(bool));
-	memset(nulls, true, rec->tupdesc->natts * sizeof(bool));
-
-	tup = heap_form_tuple(rec->tupdesc, NULL, nulls);
-	if (HeapTupleIsValid(tup))
-	{
-		rec->tup = tup;
-		rec->freetup = true;
-	}
-	else
-	{
-		rec->tup = NULL;
-		rec->freetup = false;
-	}
+	return tupdesc;
 }
 
 /*
- * Prepare plans walker - this can be used for checking
+ * Sometime we must initialize a unknown record variable with NULL
+ * of type that is derived from some plan. This is necessary for later
+ * using a rec variable. Last parameter 'use_element_type' is true, when
+ * we would to assign a element type of result array.
  *
  */
-static bool
-plpgsql_lint_expr_prepare_plan(PLpgSQL_stmt *stmt, PLpgSQL_expr *expr, void *context)
+static void
+assign_tupdesc_row_or_rec(PLpgSQL_execstate *estate, PLpgSQL_row *row, PLpgSQL_rec *rec, TupleDesc tupdesc)
 {
-	PLpgSQL_execstate *estate = (PLpgSQL_execstate *) context;
-	int cursorOptions = 0;
-	bool fresh_plan = false;
+	bool	   *nulls;
+	HeapTuple  tup;
 
-	if (stmt == NULL)
-		return false;
+	if (tupdesc == NULL)
+		elog(ERROR, "tuple descriptor is empty");
 
-	estate->err_stmt = stmt;
-
-	/* overwrite a estate variables */
-
-	switch (stmt->cmd_type)
+	if (rec != NULL)
 	{
-		case PLPGSQL_STMT_OPEN:
-			{
-				PLpgSQL_stmt_open *stmt_open = (PLpgSQL_stmt_open *) stmt;
-				PLpgSQL_var *curvar = (PLpgSQL_var *) estate->datums[stmt_open->curvar];
+		PLpgSQL_rec *target = (PLpgSQL_rec *)(estate->datums[rec->dno]);
 
-				cursorOptions = curvar->cursor_options;
-			}
-			break;
+		if (target->freetup)
+			heap_freetuple(target->tup);
 
-		case PLPGSQL_STMT_FORC:
-			{
-				PLpgSQL_stmt_forc *stmt_forc = (PLpgSQL_stmt_forc *) stmt;
-				PLpgSQL_var *curvar = (PLpgSQL_var *) estate->datums[stmt_forc->curvar];
+		if (rec->freetupdesc)
+			FreeTupleDesc(target->tupdesc);
 
-				/*
-				 * change a cursorOption only when this call is related to
-				 * curvar->cursor_explicit_expr
-				 */
-				if (curvar->cursor_explicit_expr == expr)
-					cursorOptions = curvar->cursor_options;
-			}
-			break;
+		/* initialize rec by NULLs */
+		nulls = (bool *) palloc(tupdesc->natts * sizeof(bool));
+		memset(nulls, true, tupdesc->natts * sizeof(bool));
 
-		case PLPGSQL_STMT_RAISE:
-			{
-				/*
-				 * When walker is called with NULL expr, then check a format string
-				 * of RAISE statement.
-				 */
-				if (expr == NULL)
-				{
-					ListCell *current_param;
-					PLpgSQL_stmt_raise *stmt_raise = (PLpgSQL_stmt_raise *) stmt;
-					char *cp;
+		target->tupdesc = CreateTupleDescCopy(tupdesc);
+		target->freetupdesc = true;
 
-					current_param = list_head(stmt_raise->params);
-
-					/* we can skip this test, when we identify a second loop */
-					if (!(current_param != NULL && (((PLpgSQL_expr *) lfirst(current_param))->plan != NULL)))
-					{
-						/* ensure any single % has a own parameter */
-						for (cp = stmt_raise->message; *cp; cp++)
-						{
-							if (cp[0] == '%')
-							{
-								if (cp[1] == '%')
-								{
-									cp++;
-									continue;
-								}
-							}
-
-							if (current_param == NULL)
-								ereport(ERROR,
-										(errcode(ERRCODE_SYNTAX_ERROR),
-									errmsg("too few parameters specified for RAISE")));
-
-							current_param = lnext(current_param);
-						}
-
-						if (current_param != NULL)
-							ereport(ERROR,
-									(errcode(ERRCODE_SYNTAX_ERROR),
-									 errmsg("too many parameters specified for RAISE")));
-					}
-				}
-			}
-			break;
+		tup = heap_form_tuple(tupdesc, NULL, nulls);
+		if (HeapTupleIsValid(tup))
+		{
+			target->tup = tup;
+			target->freetup = true;
+		}
+		else
+			elog(ERROR, "cannot to build valid composite value");
 	}
+}
 
-	/*
-	 * If first time through, create a plan for this expression.
-	 */
-	if (expr != NULL && expr->plan == NULL)
-	{
-		fresh_plan = true;
-		exec_prepare_plan(estate, expr, cursorOptions);
-	}
+static void
+assign_tupdesc_dno(PLpgSQL_execstate *estate, int varno, TupleDesc tupdesc)
+{
+	PLpgSQL_datum *target = estate->datums[varno];
 
-	/*
-	 * very common practic in PLpgSQL is  is using a record type. But any using of
-	 * untyped record breaks a check. A solution is an prediction of record type based
-	 * on plans - a following switch covers all PLpgSQL statements where a record
-	 * variable can be assigned.
-	 *
-	 * when record is target of dynamic SQL statement, then raise exception
-	 *
-	 */
-	switch (stmt->cmd_type)
-	{
-		case PLPGSQL_STMT_ASSIGN:
-			{
-				PLpgSQL_stmt_assign *stmt_assign = (PLpgSQL_stmt_assign *) stmt;
-				PLpgSQL_datum *target = (estate->datums[stmt_assign->varno]);
+	if (target->dtype == PLPGSQL_DTYPE_REC)
+		assign_tupdesc_row_or_rec(estate, NULL, (PLpgSQL_rec *) target, tupdesc);
+}
 
-				if (target->dtype == PLPGSQL_DTYPE_REC)
-				{
-					assign_result_desc(estate, stmt,
-								(PLpgSQL_rec *) target,
-									    stmt_assign->expr,
-												false);
-				}
-			}
-			break;
+static void
+cleanup(bool fresh_plan, PLpgSQL_expr *expr, TupleDesc tupdesc)
+{
+	Assert(expr->plan != NULL);
 
-		case PLPGSQL_STMT_EXECSQL:
-			{
-				PLpgSQL_stmt_execsql *stmt_execsql = (PLpgSQL_stmt_execsql *) stmt;
+	if (tupdesc != NULL)
+		ReleaseTupleDesc(tupdesc);
 
-				if (stmt_execsql->rec != NULL)
-				{
-					assign_result_desc(estate, stmt,
-								(PLpgSQL_rec *) (estate->datums[stmt_execsql->rec->dno]),
-									stmt_execsql->sqlstmt,
-												false);
-				}
-			}
-			break;
-
-		case PLPGSQL_STMT_FETCH:
-			{
-				PLpgSQL_stmt_fetch *stmt_fetch = (PLpgSQL_stmt_fetch *) stmt;
-
-				/* fetch can not determinate a record datatype for refcursors */
-				if (stmt_fetch->rec != NULL)
-				{
-					PLpgSQL_var *curvar = (PLpgSQL_var *)( estate->datums[stmt_fetch->curvar]);
-					PLpgSQL_rec *rec = (PLpgSQL_rec *) (estate->datums[stmt_fetch->rec->dno]);
-
-					if (curvar->cursor_explicit_expr == NULL)
-						elog(ERROR, "cannot to determinate record type for refcursor");
-
-					assign_result_desc(estate, stmt,
-								rec,
-									curvar->cursor_explicit_expr,
-											    false);
-				}
-			}
-			break;
-
-		case PLPGSQL_STMT_FORS:
-			{
-				PLpgSQL_stmt_fors *stmt_fors = (PLpgSQL_stmt_fors *) stmt;
-
-				if (stmt_fors->rec != NULL)
-				{
-					assign_result_desc(estate, stmt,
-								(PLpgSQL_rec *) (estate->datums[stmt_fors->rec->dno]),
-									stmt_fors->query,
-											    false);
-				}
-			}
-			break;
-
-		case PLPGSQL_STMT_FORC:
-			{
-				PLpgSQL_stmt_forc *stmt_forc = (PLpgSQL_stmt_forc *) stmt;
-				PLpgSQL_var *curvar = (PLpgSQL_var *) (estate->datums[stmt_forc->curvar]);
-
-				if (stmt_forc->rec != NULL && curvar->cursor_explicit_expr == expr)
-				{
-					PLpgSQL_rec *rec = (PLpgSQL_rec *) (estate->datums[stmt_forc->rec->dno]);
-
-					assign_result_desc(estate, stmt,
-									rec,
-									curvar->cursor_explicit_expr,
-											    false);
-				}
-			}
-			break;
-
-#if PG_VERSION_NUM >= 90100
-
-		case PLPGSQL_STMT_FOREACH_A:
-			{
-				PLpgSQL_stmt_foreach_a *stmt_foreach_a = (PLpgSQL_stmt_foreach_a *) stmt;
-				PLpgSQL_datum *loop_var = estate->datums[stmt_foreach_a->varno];
-
-				if (loop_var->dtype == PLPGSQL_DTYPE_REC)
-				{
-					assign_result_desc(estate, stmt,
-								(PLpgSQL_rec *) loop_var,
-									stmt_foreach_a->expr,
-											    true);
-				}
-			}
-			break;
-
-#endif
-
-		case PLPGSQL_STMT_CASE:
-			{
-				PLpgSQL_stmt_case *stmt_case = (PLpgSQL_stmt_case *) stmt;
-				TupleDesc tupdesc;
-				Oid result_oid;
-
-				/*
-				 * this is special case - a result type of expression should to
-				 * overwrite a expected int datatype.
-				 */
-				if (stmt_case->t_expr == expr)
-				{
-					CachedPlanSource *plansource = NULL;
-					const char *err_text = estate->err_text;
-
-					estate->err_text = NULL;
-					estate->err_stmt = stmt;
-
-
-					if (expr  != NULL && expr->plan != NULL)
-					{
-						SPIPlanPtr plan = expr->plan;
-						PLpgSQL_var *t_var = (PLpgSQL_var *) estate->datums[stmt_case->t_varno];
-
-						if (plan == NULL || plan->magic != _SPI_PLAN_MAGIC)
-							elog(ERROR, "cached plan is not valid plan");
-
-						if (list_length(plan->plancache_list) != 1)
-							elog(ERROR, "plan is not single execution plan");
-
-						plansource = (CachedPlanSource *) linitial(plan->plancache_list);
-						tupdesc = CreateTupleDescCopy(plansource->resultDesc);
-
-						if (tupdesc->natts != 1)
-							ereport(ERROR,
-								    (errcode(ERRCODE_SYNTAX_ERROR),
-								     errmsg_plural("query \"%s\" returned %d column",
-									   "query \"%s\" returned %d columns",
-										    tupdesc->natts,
-										    expr->query,
-										    tupdesc->natts)));
-
-						result_oid = tupdesc->attrs[0]->atttypid;
-
-						/*
-						 * When expected datatype is different from real, change it. Note that
-						 * what we're modifying here is an execution copy of the datum, so
-						 * this doesn't affect the originally stored function parse tree.
-						 */
-
-#if PG_VERSION_NUM >= 90100
-
-						if (t_var->datatype->typoid != result_oid)
-							t_var->datatype = plpgsql_build_datatype(result_oid,
-															 -1,
-														   estate->func->fn_input_collation);
-#else
-
-							t_var->datatype = plpgsql_build_datatype(result_oid, -1);
-
-#endif
-
-						FreeTupleDesc(tupdesc);
-					}
-					else
-						elog(ERROR, "there are no plan for query: \"%s\"",
-											expr->query);
-
-					estate->err_text = err_text;
-				}
-			}
-			break;
-
-
-		case PLPGSQL_STMT_DYNEXECUTE:
-			{
-				PLpgSQL_stmt_dynexecute *stmt_dynexecute = (PLpgSQL_stmt_dynexecute *) stmt;
-
-				if (stmt_dynexecute->into && stmt_dynexecute->rec != NULL)
-					elog(ERROR, "cannot to determine a result of dynamic SQL");
-			}
-			break;
-
-		case PLPGSQL_STMT_DYNFORS:
-			{
-				PLpgSQL_stmt_dynfors *stmt_dynfors = (PLpgSQL_stmt_dynfors *) stmt;
-
-				if (stmt_dynfors->rec != NULL)
-					elog(ERROR, "cannot to determinate a result of dynamic SQL");
-			}
-			break;
-	}
-
-	/*
-	 * Don't drop a plan generated by PLpgSQL runtime. Only plans used
-	 * for checking are droped.
-	 */
-	if (expr != NULL && fresh_plan)
+	if (fresh_plan)
 	{
 		SPI_freeplan(expr->plan);
 		expr->plan = NULL;
 	}
-
-	return false;
 }

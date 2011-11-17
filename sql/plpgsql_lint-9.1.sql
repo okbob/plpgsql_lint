@@ -162,3 +162,18 @@ $$ language plpgsql;
 select f1();
 
 drop function f1();
+
+create or replace function f1()
+returns void as $$
+declare  dg record;
+begin
+  if false then
+    dg := 10,20;
+  end if;
+end;
+$$ language plpgsql;
+
+select f1();
+
+drop function f1();
+

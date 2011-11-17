@@ -66,7 +66,7 @@ end;
 $$ language plpgsql;
 select f1();
 ERROR:  record "r" has no field "c"
-CONTEXT:  PL/pgSQL function "f1" line 4 at FOR over SELECT rows
+CONTEXT:  PL/pgSQL function "f1" line 6 at assignment
 drop function f1();
 drop function g1();
 create function f1()
@@ -159,5 +159,5 @@ end;
 $$ language plpgsql;
 select f1();
 ERROR:  record "_exception" has no field "hint"
-CONTEXT:  PL/pgSQL function "f1" line 5 at assignment
+CONTEXT:  PL/pgSQL function "f1" line 7 at GET DIAGNOSTICS
 drop function f1();

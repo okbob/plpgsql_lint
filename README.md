@@ -80,10 +80,6 @@ variables and cannot to check a dependent SQLs and expressions. Don't use record
 as target for dynamic queries or disable _plpgsql_lint_ for functions that use a dynamic
 queries.
 
-### Assign to target
-
-_plpgsql_lint_ doesn't verify a lvalue against to rvalue yet.
-
 ## Licence
 
 Copyright (c) Pavel Stehule (pavel.stehule@gmail.com)

@@ -56,8 +56,6 @@ static TupleDesc query_get_desc(PLpgSQL_execstate *estate, PLpgSQL_expr *query,
 static void simple_check_expr(PLpgSQL_execstate *estate, PLpgSQL_stmt *stmt, PLpgSQL_expr *expr);
 
 
-
-
 #if PG_VERSION_NUM < 90000
 
 static Oid exec_get_datum_type(PLpgSQL_execstate *estate,
@@ -413,7 +411,7 @@ prepare_tupdesc_row_or_rec(PLpgSQL_execstate *estate, PLpgSQL_expr *expr,
 	 *       target_varno is DTYPE_REC
 	 *       is fresh_plan and is expression
 	 */
-	if (fresh_plan && rec != NULL)
+	if (fresh_plan || rec != NULL)
 	{
 		tupdesc = query_get_desc(estate, expr, false, false, false);
 	}
@@ -940,6 +938,14 @@ lint_stmt(PLpgSQL_execstate *estate,
 			break;
 
 		case PLPGSQL_STMT_PERFORM:
+			{
+				PLpgSQL_stmt_perform *stmt_perform = (PLpgSQL_stmt_perform *) stmt;
+
+				prepare_expr(estate, stmt, stmt_perform->expr, &fresh_plan);
+				cleanup(fresh_plan, stmt_perform->expr, NULL);
+			}
+			break;
+
 			simple_check_expr(estate, stmt, ((PLpgSQL_stmt_perform *) stmt)->expr);
 			break;
 
@@ -987,23 +993,26 @@ lint_stmt(PLpgSQL_execstate *estate,
 				if (!(current_param != NULL && (((PLpgSQL_expr *) lfirst(current_param))->plan != NULL)))
 				{
 					/* ensure any single % has a own parameter */
-					for (cp = stmt_raise->message; *cp; cp++)
+					if (stmt_raise->message != NULL)
 					{
-						if (cp[0] == '%')
+						for (cp = stmt_raise->message; *cp; cp++)
 						{
-							if (cp[1] == '%')
+							if (cp[0] == '%')
 							{
-								cp++;
-								continue;
+								if (cp[1] == '%')
+								{
+									cp++;
+									continue;
+								}
+
+								if (current_param == NULL)
+									ereport(ERROR,
+											(errcode(ERRCODE_SYNTAX_ERROR),
+										errmsg("too few parameters specified for RAISE")));
+
+								current_param = lnext(current_param);
 							}
 						}
-
-						if (current_param == NULL)
-							ereport(ERROR,
-									(errcode(ERRCODE_SYNTAX_ERROR),
-								errmsg("too few parameters specified for RAISE")));
-
-						current_param = lnext(current_param);
 					}
 
 					if (current_param != NULL)
@@ -1212,7 +1221,7 @@ query_get_desc(PLpgSQL_execstate *estate,
 
 		unpack_tupdesc = lookup_rowtype_tupdesc_noerror(tupdesc->attrs[0]->atttypid,
 								tupdesc->attrs[0]->atttypmod,
-												    true);
+											    true);
 		if (unpack_tupdesc != NULL)
 		{
 			FreeTupleDesc(tupdesc);
@@ -1234,7 +1243,8 @@ query_get_desc(PLpgSQL_execstate *estate,
 			tupdesc->tdtypmod == -1 &&
 			tupdesc->natts == 1 &&
 			tupdesc->attrs[0]->atttypid == RECORDOID &&
-			tupdesc->attrs[0]->atttypmod == -1)
+			tupdesc->attrs[0]->atttypmod == -1 &&
+			expand_record)
 	{
 		PlannedStmt *_stmt;
 		Plan		*_plan;
@@ -1297,14 +1307,6 @@ query_get_desc(PLpgSQL_execstate *estate,
 #endif
 	}
 
-	/* last recheck */
-	if (tupdesc->tdtypeid == RECORDOID &&
-			tupdesc->tdtypmod == -1 &&
-			tupdesc->natts == 1 &&
-			tupdesc->attrs[0]->atttypid == RECORDOID &&
-			tupdesc->attrs[0]->atttypmod == -1)
-		elog(ERROR, "cannot to identify real type for record type variable");
-
 	return tupdesc;
 }
 
@@ -1321,12 +1323,12 @@ assign_tupdesc_row_or_rec(PLpgSQL_execstate *estate, PLpgSQL_row *row, PLpgSQL_r
 	bool	   *nulls;
 	HeapTuple  tup;
 
-	if (tupdesc == NULL)
-		elog(ERROR, "tuple descriptor is empty");
-
 	if (rec != NULL)
 	{
 		PLpgSQL_rec *target = (PLpgSQL_rec *)(estate->datums[rec->dno]);
+
+		if (tupdesc == NULL)
+			elog(ERROR, "tuple descriptor is empty");
 
 		if (target->freetup)
 			heap_freetuple(target->tup);

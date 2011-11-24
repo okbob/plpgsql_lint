@@ -7,6 +7,7 @@
 
 #include "catalog/pg_type.h"
 #include "utils/builtins.h"
+#include "utils/elog.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/typcache.h"
@@ -120,6 +121,8 @@ lint_func_beg( PLpgSQL_execstate * estate, PLpgSQL_function * func )
 		int i;
 		PLpgSQL_rec *saved_records;
 		PLpgSQL_var *saved_vars;
+		MemoryContext oldcontext;
+		ResourceOwner oldowner;
 
 		/*
 		 * inside control a rec and vars variables are modified, so we should to save their
@@ -157,7 +160,31 @@ lint_func_beg( PLpgSQL_execstate * estate, PLpgSQL_function * func )
 
 		estate->err_text = NULL;
 
-		lint_stmt(estate, func, (PLpgSQL_stmt *) func->action);
+		/*
+		 * Raised exception should be trapped in outer functtion. Protection
+		 * against outer trap is QUERY_CANCELED exception. 
+		 */
+		oldcontext = CurrentMemoryContext;
+		oldowner = CurrentResourceOwner;
+
+		PG_TRY();
+		{
+			lint_stmt(estate, func, (PLpgSQL_stmt *) func->action);
+		}
+		PG_CATCH();
+		{
+			ErrorData  *edata;
+
+			/* Save error info */
+			MemoryContextSwitchTo(oldcontext);
+			edata = CopyErrorData();
+			FlushErrorState();
+			CurrentResourceOwner = oldowner;
+
+			edata->sqlerrcode = ERRCODE_QUERY_CANCELED;
+			ReThrowError(edata);
+		}
+		PG_END_TRY();
 
 		estate->err_text = err_text;
 		estate->err_stmt = NULL;

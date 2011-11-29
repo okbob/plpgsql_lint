@@ -80,6 +80,12 @@ variables and cannot to check a dependent SQLs and expressions. Don't use record
 as target for dynamic queries or disable _plpgsql_lint_ for functions that use a dynamic
 queries.
 
+### Temporary tables
+
+_plpgsql_lint_ cannot to verify queries over temporary tables that are created in plpgsql's function
+runtime. For this use case is necessary to create a fake temp table or disable _plpgsql_lint_ for this
+function.
+
 ## Licence
 
 Copyright (c) Pavel Stehule (pavel.stehule@gmail.com)

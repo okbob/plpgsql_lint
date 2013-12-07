@@ -12,7 +12,7 @@ every time when function is started.
 
 
 ## Installation
- * copy the source code to PostgreSQL's source code tree (8.4.x, 9.0.x, 9.1.x, [9.2.x]) - to _contrib_ directory
+ * copy the source code to PostgreSQL's source code tree (8.4.x, 9.0.x, 9.1.x, [9.2.x], 9.3.x) - to _contrib_ directory
  * compile it there and install it - _make; make install_
 
 ## Usage

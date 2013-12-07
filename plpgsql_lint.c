@@ -12,6 +12,10 @@
 #include "utils/lsyscache.h"
 #include "utils/typcache.h"
 
+#if PG_VERSION_NUM >= 90300
+#include "access/htup_details.h"
+#endif
+
 #ifdef PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
 #endif
